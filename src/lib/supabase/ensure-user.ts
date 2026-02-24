@@ -12,21 +12,40 @@ type UserRow = Database["public"]["Tables"]["users"]["Row"];
 export async function ensureUser(clerkUserId: string): Promise<UserRow> {
   const supabase = createAdminClient();
 
-  // Try to find existing user
+  // ── diagnostic: verify table is reachable and inspect stored IDs ──
+  const { data: allUsers, error: tableError } = await supabase
+    .from("users")
+    .select("id, clerk_user_id")
+    .limit(10);
+
+  console.log("[ensureUser] clerk auth() userId:", JSON.stringify(clerkUserId));
+  console.log("[ensureUser] table query error:", tableError ?? "none");
+  console.log(
+    "[ensureUser] rows in users table:",
+    allUsers
+      ? allUsers.map((u) => ({
+          id: u.id,
+          clerk_user_id: u.clerk_user_id,
+        }))
+      : "null (table may not exist)"
+  );
+  // ── end diagnostic ──
+
+  // Look up by clerk_user_id
   const { data: existing, error: lookupError } = await supabase
     .from("users")
     .select("*")
     .eq("clerk_user_id", clerkUserId)
     .single();
 
-  if (existing) return existing;
+  console.log("[ensureUser] lookup result:", {
+    found: !!existing,
+    error: lookupError
+      ? { code: lookupError.code, message: lookupError.message }
+      : null,
+  });
 
-  // Log why the lookup failed so we can diagnose issues
-  if (lookupError) {
-    console.log(
-      `[ensureUser] Lookup miss for clerk_user_id="${clerkUserId}": ${lookupError.code} — ${lookupError.message}`
-    );
-  }
+  if (existing) return existing;
 
   // User missing — pull profile from Clerk and create the row
   const clerkUser = await currentUser();
@@ -34,6 +53,11 @@ export async function ensureUser(clerkUserId: string): Promise<UserRow> {
   if (!clerkUser) {
     throw new Error("Clerk session expired — cannot create user");
   }
+
+  console.log("[ensureUser] Creating new user from Clerk profile:", {
+    clerkId: clerkUser.id,
+    email: clerkUser.emailAddresses[0]?.emailAddress,
+  });
 
   const email = clerkUser.emailAddresses[0]?.emailAddress ?? "";
   const fullName =
@@ -74,5 +98,6 @@ export async function ensureUser(clerkUserId: string): Promise<UserRow> {
     throw new Error("Insert returned no data");
   }
 
+  console.log("[ensureUser] Created user:", created.id);
   return created;
 }
