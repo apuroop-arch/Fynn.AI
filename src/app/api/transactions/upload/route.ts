@@ -1,6 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { ensureUser } from "@/lib/supabase/ensure-user";
 import { parseCSV, normalizeTransactions } from "@/lib/csv-parser";
 
 export async function POST(req: NextRequest) {
@@ -27,22 +28,11 @@ export async function POST(req: NextRequest) {
     const rawRows = await parseCSV(csvText);
     const normalized = normalizeTransactions(rawRows, currency);
 
-    // Get the Supabase user ID
-    const supabase = createAdminClient();
-    const { data: dbUser, error: userError } = await supabase
-      .from("users")
-      .select("id")
-      .eq("clerk_user_id", userId)
-      .single();
-
-    if (userError || !dbUser) {
-      return NextResponse.json(
-        { error: "User not found in database" },
-        { status: 404 }
-      );
-    }
+    // Get or create the Supabase user
+    const dbUser = await ensureUser(userId);
 
     // Insert transactions
+    const supabase = createAdminClient();
     const transactionsToInsert = normalized.map((t) => ({
       user_id: dbUser.id,
       date: t.date,

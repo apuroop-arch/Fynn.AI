@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { ensureUser } from "@/lib/supabase/ensure-user";
 
 const anthropic = new Anthropic();
 
@@ -28,18 +29,8 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const dbUser = await ensureUser(userId);
   const supabase = createAdminClient();
-
-  // Get user
-  const { data: dbUser, error: userError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("clerk_user_id", userId)
-    .single();
-
-  if (userError || !dbUser) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
 
   // Get invoice
   const { data: invoice, error: invError } = await supabase

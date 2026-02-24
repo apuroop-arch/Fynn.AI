@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { ensureUser } from "@/lib/supabase/ensure-user";
 
 const anthropic = new Anthropic();
 
@@ -11,17 +12,8 @@ export async function POST() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const dbUser = await ensureUser(userId);
   const supabase = createAdminClient();
-
-  const { data: dbUser, error: userError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("clerk_user_id", userId)
-    .single();
-
-  if (userError || !dbUser) {
-    return NextResponse.json({ error: "User not found" }, { status: 404 });
-  }
 
   // Get last 30 days of transactions
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
