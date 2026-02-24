@@ -30,7 +30,7 @@ export default function UploadPage() {
       const text = await file.text();
       setCsvText(text);
 
-      // Client-side preview parse
+      // Client-side preview parse — purely local, no API call
       try {
         const { parseCSV, normalizeTransactions } = await import(
           "@/lib/csv-parser"
@@ -38,6 +38,7 @@ export default function UploadPage() {
         const raw = await parseCSV(text);
         const normalized = normalizeTransactions(raw, currency);
         setPreview(normalized);
+        setError("");       // clear any leftover error from a prior import
         setStep("preview");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to parse CSV");
