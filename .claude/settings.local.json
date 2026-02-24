@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Skill(claude-developer-platform)",
+      "Bash(cd \"C:/Users/saike/Desktop/Fynn.AI\" && npx next build 2>&1)",
+      "Bash(cd \"C:/Users/saike/Desktop/Fynn.AI\" && npm run dev 2>&1)",
+      "Bash(cd \"C:/Users/saike/Desktop/Fynn.AI\" && npm ls @clerk/nextjs 2)"
+    ]
+  }
+}
