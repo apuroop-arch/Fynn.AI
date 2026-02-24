@@ -2,56 +2,63 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { ensureUser } from "@/lib/supabase/ensure-user";
 
 const anthropic = new Anthropic();
 
 export async function POST() {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const dbUser = await ensureUser(userId);
-  const supabase = createAdminClient();
+    const supabase = createAdminClient();
 
-  // Fetch transactions
-  const { data: transactions, error: txError } = await supabase
-    .from("transactions")
-    .select("*")
-    .eq("user_id", dbUser.id)
-    .order("date", { ascending: false });
+    // Transactions now use Clerk userId directly
+    const { data: transactions, error: txError } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("user_id", userId)
+      .order("date", { ascending: false });
 
-  if (txError) {
-    return NextResponse.json(
-      { error: "Failed to fetch transactions" },
-      { status: 500 }
-    );
-  }
+    if (txError) {
+      return NextResponse.json(
+        { error: "Failed to fetch transactions" },
+        { status: 500 }
+      );
+    }
 
-  // Fetch invoices
-  const { data: invoices, error: invError } = await supabase
-    .from("invoices")
-    .select("*")
-    .eq("user_id", dbUser.id);
+    // Invoices still use users table FK — look up user first
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let invoices: any[] = [];
+    const { data: userRow } = await supabase
+      .from("users")
+      .select("id")
+      .eq("clerk_user_id", userId)
+      .maybeSingle();
 
-  if (invError) {
-    return NextResponse.json(
-      { error: "Failed to fetch invoices" },
-      { status: 500 }
-    );
-  }
+    if (userRow) {
+      const { data: invData } = await supabase
+        .from("invoices")
+        .select("*")
+        .eq("user_id", userRow.id);
+      invoices = invData ?? [];
+    }
 
-  if ((!transactions || transactions.length === 0) && (!invoices || invoices.length === 0)) {
-    return NextResponse.json({
-      analysis: null,
-      message: "No transactions or invoices found. Upload data to begin analysis.",
-    });
-  }
+    if (
+      (!transactions || transactions.length === 0) &&
+      invoices.length === 0
+    ) {
+      return NextResponse.json({
+        analysis: null,
+        message:
+          "No transactions or invoices found. Upload data to begin analysis.",
+      });
+    }
 
-  const today = new Date().toISOString().split("T")[0];
+    const today = new Date().toISOString().split("T")[0];
 
-  const prompt = `You are a financial analyst for a freelancer/SMB. Analyze the following financial data and identify revenue leakage.
+    const prompt = `You are a financial analyst for a freelancer/SMB. Analyze the following financial data and identify revenue leakage.
 
 TODAY'S DATE: ${today}
 
@@ -59,7 +66,7 @@ TRANSACTIONS (most recent first):
 ${JSON.stringify(transactions?.slice(0, 200) ?? [], null, 2)}
 
 INVOICES:
-${JSON.stringify(invoices ?? [], null, 2)}
+${JSON.stringify(invoices, null, 2)}
 
 Perform the following analysis and return a JSON object:
 
@@ -78,27 +85,36 @@ Perform the following analysis and return a JSON object:
 
 Return ONLY valid JSON matching this structure. All dollar amounts should be numbers, not strings.`;
 
-  const stream = anthropic.messages.stream({
-    model: "claude-opus-4-6",
-    max_tokens: 4096,
-    thinking: { type: "adaptive" },
-    messages: [{ role: "user", content: prompt }],
-  });
+    const stream = anthropic.messages.stream({
+      model: "claude-opus-4-6",
+      max_tokens: 4096,
+      thinking: { type: "adaptive" },
+      messages: [{ role: "user", content: prompt }],
+    });
 
-  const response = await stream.finalMessage();
+    const response = await stream.finalMessage();
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  const rawText = textBlock?.text ?? "{}";
+    const textBlock = response.content.find((block) => block.type === "text");
+    const rawText = textBlock?.text ?? "{}";
 
-  // Extract JSON from response (handle markdown code blocks)
-  let analysis;
-  try {
-    const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const jsonStr = jsonMatch ? jsonMatch[1].trim() : rawText.trim();
-    analysis = JSON.parse(jsonStr);
-  } catch {
-    analysis = { raw_analysis: rawText };
+    let analysis;
+    try {
+      const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = jsonMatch ? jsonMatch[1].trim() : rawText.trim();
+      analysis = JSON.parse(jsonStr);
+    } catch {
+      analysis = { raw_analysis: rawText };
+    }
+
+    return NextResponse.json({ analysis });
+  } catch (err) {
+    console.error("[leakage] Unhandled error:", err);
+    return NextResponse.json(
+      {
+        error: "Internal server error",
+        detail: err instanceof Error ? err.message : String(err),
+      },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json({ analysis });
 }

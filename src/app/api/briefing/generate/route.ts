@@ -2,60 +2,74 @@ import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { ensureUser } from "@/lib/supabase/ensure-user";
 
 const anthropic = new Anthropic();
 
 export async function POST() {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const dbUser = await ensureUser(userId);
-  const supabase = createAdminClient();
+    const supabase = createAdminClient();
 
-  // Get last 30 days of transactions
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .split("T")[0];
+    // Transactions now use Clerk userId directly
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .split("T")[0];
 
-  const { data: transactions } = await supabase
-    .from("transactions")
-    .select("*")
-    .eq("user_id", dbUser.id)
-    .gte("date", thirtyDaysAgo)
-    .order("date", { ascending: false });
+    const { data: transactions } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("user_id", userId)
+      .gte("date", thirtyDaysAgo)
+      .order("date", { ascending: false });
 
-  const { data: invoices } = await supabase
-    .from("invoices")
-    .select("*")
-    .eq("user_id", dbUser.id);
+    // Invoices still use users table FK — look up user first
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let invoices: any[] = [];
+    let userName = "Business Owner";
 
-  if (
-    (!transactions || transactions.length === 0) &&
-    (!invoices || invoices.length === 0)
-  ) {
-    return NextResponse.json({
-      briefing: null,
-      message: "No financial data available for briefing.",
-    });
-  }
+    const { data: userRow } = await supabase
+      .from("users")
+      .select("id, full_name")
+      .eq("clerk_user_id", userId)
+      .maybeSingle();
 
-  const today = new Date();
-  const weekStart = new Date(today);
-  weekStart.setDate(today.getDate() - today.getDay() + 1); // Monday
+    if (userRow) {
+      userName = userRow.full_name || userName;
+      const { data: invData } = await supabase
+        .from("invoices")
+        .select("*")
+        .eq("user_id", userRow.id);
+      invoices = invData ?? [];
+    }
 
-  const prompt = `You are a financial advisor writing a personalized weekly briefing for a freelancer/SMB owner.
+    if (
+      (!transactions || transactions.length === 0) &&
+      invoices.length === 0
+    ) {
+      return NextResponse.json({
+        briefing: null,
+        message: "No financial data available for briefing.",
+      });
+    }
 
-RECIPIENT: ${dbUser.full_name || "Business Owner"}
+    const today = new Date();
+    const weekStart = new Date(today);
+    weekStart.setDate(today.getDate() - today.getDay() + 1);
+
+    const prompt = `You are a financial advisor writing a personalized weekly briefing for a freelancer/SMB owner.
+
+RECIPIENT: ${userName}
 WEEK OF: ${weekStart.toISOString().split("T")[0]}
 
 RECENT TRANSACTIONS (last 30 days):
 ${JSON.stringify(transactions?.slice(0, 100) ?? [], null, 2)}
 
 INVOICES:
-${JSON.stringify(invoices ?? [], null, 2)}
+${JSON.stringify(invoices, null, 2)}
 
 Write a personalized financial briefing in 250-350 words. Include:
 
@@ -67,28 +81,40 @@ Write a personalized financial briefing in 250-350 words. Include:
 
 Tone: Professional but warm, like a trusted advisor. Use specific dollar amounts. Address the recipient by first name. Do NOT use markdown headers — use plain text paragraphs with bold for emphasis.`;
 
-  const stream = anthropic.messages.stream({
-    model: "claude-opus-4-6",
-    max_tokens: 2048,
-    thinking: { type: "adaptive" },
-    messages: [{ role: "user", content: prompt }],
-  });
+    const stream = anthropic.messages.stream({
+      model: "claude-opus-4-6",
+      max_tokens: 2048,
+      thinking: { type: "adaptive" },
+      messages: [{ role: "user", content: prompt }],
+    });
 
-  const response = await stream.finalMessage();
+    const response = await stream.finalMessage();
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  const briefingContent = textBlock?.text ?? "";
+    const textBlock = response.content.find((block) => block.type === "text");
+    const briefingContent = textBlock?.text ?? "";
 
-  // Store briefing
-  const { data: briefing } = await supabase
-    .from("briefings")
-    .insert({
-      user_id: dbUser.id,
-      content: briefingContent,
-      week_start: weekStart.toISOString().split("T")[0],
-    })
-    .select()
-    .single();
+    // Store briefing — if user exists in users table, store with their uuid
+    if (userRow) {
+      await supabase
+        .from("briefings")
+        .insert({
+          user_id: userRow.id,
+          content: briefingContent,
+          week_start: weekStart.toISOString().split("T")[0],
+        });
+    }
 
-  return NextResponse.json({ briefing });
+    return NextResponse.json({
+      briefing: { content: briefingContent },
+    });
+  } catch (err) {
+    console.error("[briefing] Unhandled error:", err);
+    return NextResponse.json(
+      {
+        error: "Internal server error",
+        detail: err instanceof Error ? err.message : String(err),
+      },
+      { status: 500 }
+    );
+  }
 }

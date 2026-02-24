@@ -6,10 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 const anthropic = new Anthropic();
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// This endpoint is called by an external cron service every Monday
-// e.g., via Vercel Cron, GitHub Actions, or similar
 export async function POST(req: NextRequest) {
-  // Verify cron secret to prevent unauthorized access
   const cronSecret = req.headers.get("x-cron-secret");
   if (cronSecret !== process.env.CRON_SECRET) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -17,7 +14,6 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminClient();
 
-  // Get all users
   const { data: users, error: usersError } = await supabase
     .from("users")
     .select("*");
@@ -29,22 +25,27 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const results: { email: string; status: "sent" | "skipped" | "error"; error?: string }[] = [];
+  const results: {
+    email: string;
+    status: "sent" | "skipped" | "error";
+    error?: string;
+  }[] = [];
 
   for (const user of users) {
     try {
-      // Get last 30 days of transactions
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
         .toISOString()
         .split("T")[0];
 
+      // Transactions use clerk_user_id directly
       const { data: transactions } = await supabase
         .from("transactions")
         .select("*")
-        .eq("user_id", user.id)
+        .eq("user_id", user.clerk_user_id)
         .gte("date", thirtyDaysAgo)
         .order("date", { ascending: false });
 
+      // Invoices still use users.id (uuid FK)
       const { data: invoices } = await supabase
         .from("invoices")
         .select("*")
@@ -95,7 +96,6 @@ Tone: Professional but warm. Use specific dollar amounts. Address the recipient 
       );
       const briefingContent = textBlock?.text ?? "";
 
-      // Store briefing
       await supabase.from("briefings").insert({
         user_id: user.id,
         content: briefingContent,
@@ -103,7 +103,6 @@ Tone: Professional but warm. Use specific dollar amounts. Address the recipient 
         emailed: true,
       });
 
-      // Send email via Resend
       await resend.emails.send({
         from: "Fynn <briefing@fynn.ai>",
         to: user.email,
