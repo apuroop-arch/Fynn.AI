@@ -62,7 +62,9 @@ export async function POST(req: NextRequest) {
       count: inserted.length,
     });
   } catch (err) {
+    console.error("[upload] Error:", err);
     const message = err instanceof Error ? err.message : "Upload failed";
-    return NextResponse.json({ error: message }, { status: 400 });
+    const status = message.includes("session expired") ? 401 : 400;
+    return NextResponse.json({ error: message }, { status });
   }
 }
