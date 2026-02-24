@@ -3,67 +3,76 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-const anthropic = new Anthropic();
-const resend = new Resend(process.env.RESEND_API_KEY);
-
 export async function POST(req: NextRequest) {
-  const cronSecret = req.headers.get("x-cron-secret");
-  if (cronSecret !== process.env.CRON_SECRET) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  try {
+    const cronSecret = req.headers.get("x-cron-secret");
+    if (cronSecret !== process.env.CRON_SECRET) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const supabase = createAdminClient();
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "ANTHROPIC_API_KEY is not configured" },
+        { status: 500 }
+      );
+    }
 
-  const { data: users, error: usersError } = await supabase
-    .from("users")
-    .select("*");
+    const anthropic = new Anthropic({ apiKey });
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    const supabase = createAdminClient();
 
-  if (usersError || !users) {
-    return NextResponse.json(
-      { error: "Failed to fetch users" },
-      { status: 500 }
-    );
-  }
+    // We still need the users table to get email addresses for sending
+    const { data: users, error: usersError } = await supabase
+      .from("users")
+      .select("id, clerk_user_id, email, full_name");
 
-  const results: {
-    email: string;
-    status: "sent" | "skipped" | "error";
-    error?: string;
-  }[] = [];
+    if (usersError || !users) {
+      return NextResponse.json(
+        { error: "Failed to fetch users", detail: usersError?.message },
+        { status: 500 }
+      );
+    }
 
-  for (const user of users) {
-    try {
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
-        .toISOString()
-        .split("T")[0];
+    const results: {
+      email: string;
+      status: "sent" | "skipped" | "error";
+      error?: string;
+    }[] = [];
 
-      // Transactions use clerk_user_id directly
-      const { data: transactions } = await supabase
-        .from("transactions")
-        .select("*")
-        .eq("user_id", user.clerk_user_id)
-        .gte("date", thirtyDaysAgo)
-        .order("date", { ascending: false });
+    for (const user of users) {
+      try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .split("T")[0];
 
-      // Invoices still use users.id (uuid FK)
-      const { data: invoices } = await supabase
-        .from("invoices")
-        .select("*")
-        .eq("user_id", user.id);
+        // Transactions use clerk_user_id directly
+        const { data: transactions } = await supabase
+          .from("transactions")
+          .select("*")
+          .eq("user_id", user.clerk_user_id)
+          .gte("date", thirtyDaysAgo)
+          .order("date", { ascending: false });
 
-      if (
-        (!transactions || transactions.length === 0) &&
-        (!invoices || invoices.length === 0)
-      ) {
-        results.push({ email: user.email, status: "skipped" });
-        continue;
-      }
+        // Invoices also use clerk_user_id directly
+        const { data: invoices } = await supabase
+          .from("invoices")
+          .select("*")
+          .eq("user_id", user.clerk_user_id);
 
-      const today = new Date();
-      const weekStart = new Date(today);
-      weekStart.setDate(today.getDate() - today.getDay() + 1);
+        if (
+          (!transactions || transactions.length === 0) &&
+          (!invoices || invoices.length === 0)
+        ) {
+          results.push({ email: user.email, status: "skipped" });
+          continue;
+        }
 
-      const prompt = `You are a financial advisor writing a personalized weekly briefing for a freelancer/SMB owner.
+        const today = new Date();
+        const weekStart = new Date(today);
+        weekStart.setDate(today.getDate() - today.getDay() + 1);
+
+        const prompt = `You are a financial advisor writing a personalized weekly briefing for a freelancer/SMB owner.
 
 RECIPIENT: ${user.full_name || "Business Owner"}
 WEEK OF: ${weekStart.toISOString().split("T")[0]}
@@ -83,65 +92,74 @@ Write a personalized financial briefing in 250-350 words. Include:
 
 Tone: Professional but warm. Use specific dollar amounts. Address the recipient by first name. Format for email — use short paragraphs.`;
 
-      const stream = anthropic.messages.stream({
-        model: "claude-opus-4-6",
-        max_tokens: 2048,
-        thinking: { type: "adaptive" },
-        messages: [{ role: "user", content: prompt }],
-      });
+        const response = await anthropic.messages.create({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 2048,
+          messages: [{ role: "user", content: prompt }],
+        });
 
-      const aiResponse = await stream.finalMessage();
-      const textBlock = aiResponse.content.find(
-        (block) => block.type === "text"
-      );
-      const briefingContent = textBlock?.text ?? "";
+        const textBlock = response.content.find(
+          (block) => block.type === "text"
+        );
+        const briefingContent = textBlock?.text ?? "";
 
-      await supabase.from("briefings").insert({
-        user_id: user.id,
-        content: briefingContent,
-        week_start: weekStart.toISOString().split("T")[0],
-        emailed: true,
-      });
+        // Store using clerk_user_id
+        await supabase.from("briefings").insert({
+          user_id: user.clerk_user_id,
+          content: briefingContent,
+          week_start: weekStart.toISOString().split("T")[0],
+          emailed: true,
+        });
 
-      await resend.emails.send({
-        from: "Fynn <briefing@fynn.ai>",
-        to: user.email,
-        subject: `Your Weekly Financial Briefing — ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`,
-        html: `
-          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 24px;">
-            <div style="margin-bottom: 24px;">
-              <span style="background: #059669; color: white; font-weight: bold; padding: 6px 12px; border-radius: 8px; font-size: 14px;">F</span>
-              <span style="font-size: 20px; font-weight: bold; margin-left: 8px; color: #18181b;">Fynn</span>
+        await resend.emails.send({
+          from: "Fynn <briefing@fynn.ai>",
+          to: user.email,
+          subject: `Your Weekly Financial Briefing — ${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`,
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+              <div style="margin-bottom: 24px;">
+                <span style="background: #059669; color: white; font-weight: bold; padding: 6px 12px; border-radius: 8px; font-size: 14px;">F</span>
+                <span style="font-size: 20px; font-weight: bold; margin-left: 8px; color: #18181b;">Fynn</span>
+              </div>
+              <h2 style="color: #18181b; font-size: 18px; margin-bottom: 16px;">
+                Weekly Financial Briefing
+              </h2>
+              <div style="color: #3f3f46; font-size: 15px; line-height: 1.7; white-space: pre-wrap;">
+                ${briefingContent}
+              </div>
+              <hr style="border: none; border-top: 1px solid #e4e4e7; margin: 32px 0;" />
+              <p style="color: #a1a1aa; font-size: 12px;">
+                Generated by Fynn AI — your financial intelligence platform
+              </p>
             </div>
-            <h2 style="color: #18181b; font-size: 18px; margin-bottom: 16px;">
-              Weekly Financial Briefing
-            </h2>
-            <div style="color: #3f3f46; font-size: 15px; line-height: 1.7; white-space: pre-wrap;">
-              ${briefingContent}
-            </div>
-            <hr style="border: none; border-top: 1px solid #e4e4e7; margin: 32px 0;" />
-            <p style="color: #a1a1aa; font-size: 12px;">
-              Generated by Fynn AI — your financial intelligence platform
-            </p>
-          </div>
-        `,
-      });
+          `,
+        });
 
-      results.push({ email: user.email, status: "sent" });
-    } catch (err) {
-      results.push({
-        email: user.email,
-        status: "error",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
+        results.push({ email: user.email, status: "sent" });
+      } catch (err) {
+        results.push({
+          email: user.email,
+          status: "error",
+          error: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
     }
-  }
 
-  return NextResponse.json({
-    processed: results.length,
-    sent: results.filter((r) => r.status === "sent").length,
-    skipped: results.filter((r) => r.status === "skipped").length,
-    errors: results.filter((r) => r.status === "error").length,
-    results,
-  });
+    return NextResponse.json({
+      processed: results.length,
+      sent: results.filter((r) => r.status === "sent").length,
+      skipped: results.filter((r) => r.status === "skipped").length,
+      errors: results.filter((r) => r.status === "error").length,
+      results,
+    });
+  } catch (err) {
+    console.error("[cron] Unhandled error:", err);
+    return NextResponse.json(
+      {
+        error: "Weekly briefing cron failed",
+        detail: err instanceof Error ? err.message : String(err),
+      },
+      { status: 500 }
+    );
+  }
 }

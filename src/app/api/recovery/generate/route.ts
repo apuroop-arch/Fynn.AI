@@ -1,10 +1,7 @@
-import { auth } from "@clerk/nextjs/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { ensureUser } from "@/lib/supabase/ensure-user";
-
-const anthropic = new Anthropic();
 
 interface RecoveryEmail {
   sequence_number: number;
@@ -15,44 +12,81 @@ interface RecoveryEmail {
 }
 
 export async function POST(req: NextRequest) {
-  const { userId } = await auth();
-  if (!userId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-  const { invoice_id } = (await req.json()) as { invoice_id: string };
+    let body: { invoice_id?: string };
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body" },
+        { status: 400 }
+      );
+    }
 
-  if (!invoice_id) {
-    return NextResponse.json(
-      { error: "invoice_id is required" },
-      { status: 400 }
+    const { invoice_id } = body;
+    if (!invoice_id) {
+      return NextResponse.json(
+        { error: "invoice_id is required" },
+        { status: 400 }
+      );
+    }
+
+    const supabase = createAdminClient();
+
+    // Query invoice directly by clerk userId
+    const { data: invoice, error: invError } = await supabase
+      .from("invoices")
+      .select("*")
+      .eq("id", invoice_id)
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (invError) {
+      console.error("[recovery] invoice query error:", invError);
+      return NextResponse.json(
+        { error: "Failed to fetch invoice", detail: invError.message },
+        { status: 500 }
+      );
+    }
+
+    if (!invoice) {
+      return NextResponse.json(
+        { error: "Invoice not found. Make sure the invoice ID is correct and belongs to your account." },
+        { status: 404 }
+      );
+    }
+
+    // Get sender info from Clerk
+    const clerkUser = await currentUser();
+    const senderName = clerkUser
+      ? [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(" ") || "Business Owner"
+      : "Business Owner";
+    const senderEmail = clerkUser?.emailAddresses[0]?.emailAddress ?? "";
+
+    const daysOverdue = Math.floor(
+      (Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24)
     );
-  }
 
-  const dbUser = await ensureUser(userId);
-  const supabase = createAdminClient();
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "ANTHROPIC_API_KEY is not configured" },
+        { status: 500 }
+      );
+    }
 
-  // Get invoice
-  const { data: invoice, error: invError } = await supabase
-    .from("invoices")
-    .select("*")
-    .eq("id", invoice_id)
-    .eq("user_id", dbUser.id)
-    .single();
+    const anthropic = new Anthropic({ apiKey });
 
-  if (invError || !invoice) {
-    return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
-  }
-
-  const daysOverdue = Math.floor(
-    (Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24)
-  );
-
-  const prompt = `You are a professional accounts receivable specialist writing recovery emails for a freelancer/SMB owner.
+    const prompt = `You are a professional accounts receivable specialist writing recovery emails for a freelancer/SMB owner.
 
 SENDER INFO:
-- Name: ${dbUser.full_name || "Business Owner"}
-- Email: ${dbUser.email}
+- Name: ${senderName}
+- Email: ${senderEmail}
 
 INVOICE DETAILS:
 - Client: ${invoice.client_name}
@@ -79,41 +113,55 @@ For each email, provide:
 
 Return ONLY a JSON array of 3 objects. No markdown wrapping.`;
 
-  const stream = anthropic.messages.stream({
-    model: "claude-opus-4-6",
-    max_tokens: 4096,
-    thinking: { type: "adaptive" },
-    messages: [{ role: "user", content: prompt }],
-  });
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4096,
+      messages: [{ role: "user", content: prompt }],
+    });
 
-  const response = await stream.finalMessage();
+    const textBlock = response.content.find((block) => block.type === "text");
+    const rawText = textBlock?.text ?? "[]";
 
-  const textBlock = response.content.find((block) => block.type === "text");
-  const rawText = textBlock?.text ?? "[]";
+    let emails: RecoveryEmail[];
+    try {
+      const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonStr = jsonMatch ? jsonMatch[1].trim() : rawText.trim();
+      emails = JSON.parse(jsonStr);
+    } catch {
+      return NextResponse.json(
+        { error: "Failed to parse AI response", raw: rawText },
+        { status: 500 }
+      );
+    }
 
-  let emails: RecoveryEmail[];
-  try {
-    const jsonMatch = rawText.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const jsonStr = jsonMatch ? jsonMatch[1].trim() : rawText.trim();
-    emails = JSON.parse(jsonStr);
-  } catch {
+    // Store emails — user_id is now clerk userId directly
+    const emailsToInsert = emails.map((email) => ({
+      user_id: userId,
+      invoice_id: invoice.id,
+      sequence_number: email.sequence_number,
+      subject_line: email.subject_line,
+      body: email.body,
+      tone: email.tone,
+    }));
+
+    const { error: insertErr } = await supabase
+      .from("recovery_emails")
+      .insert(emailsToInsert);
+
+    if (insertErr) {
+      console.error("[recovery] insert error:", insertErr);
+      // Don't fail the whole request — emails were generated successfully
+    }
+
+    return NextResponse.json({ emails, invoice });
+  } catch (err) {
+    console.error("[recovery] Unhandled error:", err);
     return NextResponse.json(
-      { error: "Failed to parse AI response", raw: rawText },
+      {
+        error: "Recovery email generation failed",
+        detail: err instanceof Error ? err.message : String(err),
+      },
       { status: 500 }
     );
   }
-
-  // Store emails in database
-  const emailsToInsert = emails.map((email) => ({
-    user_id: dbUser.id,
-    invoice_id: invoice.id,
-    sequence_number: email.sequence_number,
-    subject_line: email.subject_line,
-    body: email.body,
-    tone: email.tone,
-  }));
-
-  await supabase.from("recovery_emails").insert(emailsToInsert);
-
-  return NextResponse.json({ emails, invoice });
 }
