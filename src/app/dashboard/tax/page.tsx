@@ -14,13 +14,22 @@ import {
   CheckCircle2,
   Clock,
   AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  Calculator,
 } from "lucide-react";
+
+interface DeductionItem {
+  name: string;
+  amount: number;
+}
 
 interface Deduction {
   category: string;
   amount_ytd: number;
   projected_annual: number;
   confidence: "high" | "medium" | "low";
+  items?: DeductionItem[];
 }
 
 interface QuarterSchedule {
@@ -38,6 +47,42 @@ interface OptimizationTip {
   priority: "high" | "medium" | "low";
 }
 
+interface CalcStep {
+  description: string;
+  amount: number;
+  formula?: string;
+  note?: string;
+  items_summary?: string;
+  social_security?: number;
+  social_security_formula?: string;
+  medicare?: number;
+  medicare_formula?: string;
+}
+
+interface BracketCalc {
+  bracket: string;
+  range_low: number;
+  range_high: number | string;
+  taxable_in_bracket: number;
+  tax_from_bracket: number;
+  formula: string;
+}
+
+interface TaxCalcSteps {
+  step_1_gross_income?: CalcStep;
+  step_2_deductions?: CalcStep;
+  step_3_net_self_employment_income?: CalcStep;
+  step_4_se_tax_base?: CalcStep;
+  step_5_se_tax?: CalcStep;
+  step_6_se_deduction?: CalcStep;
+  step_7_adjusted_gross_income?: CalcStep;
+  step_8_standard_deduction?: CalcStep;
+  step_9_taxable_income?: CalcStep;
+  step_10_federal_tax_brackets?: BracketCalc[];
+  step_11_total_federal_income_tax?: CalcStep;
+  step_12_total_tax?: CalcStep & { effective_rate?: number; effective_rate_formula?: string };
+}
+
 interface TaxData {
   income_summary?: {
     gross_income_ytd: number;
@@ -46,8 +91,11 @@ interface TaxData {
     projected_annual_income: number;
     projected_annual_expenses: number;
     projected_net_income: number;
+    months_of_data?: number;
+    projection_method?: string;
   };
   deductions?: Deduction[];
+  tax_calculation_steps?: TaxCalcSteps;
   tax_estimates?: {
     us_federal?: {
       taxable_income: number;
@@ -107,6 +155,8 @@ export default function TaxPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [noData, setNoData] = useState(false);
+  const [showCalcSteps, setShowCalcSteps] = useState(false);
+  const [expandedDeductions, setExpandedDeductions] = useState<Record<number, boolean>>({});
 
   const runCalculation = async () => {
     setLoading(true);
@@ -139,7 +189,19 @@ export default function TaxPage() {
       maximumFractionDigits: 0,
     }).format(n);
 
+  const fmtExact = (n: number) =>
+    new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(n);
+
   const pct = (n: number) => `${n.toFixed(1)}%`;
+
+  const toggleDeduction = (idx: number) => {
+    setExpandedDeductions((prev) => ({ ...prev, [idx]: !prev[idx] }));
+  };
 
   return (
     <div className="space-y-6">
@@ -147,7 +209,7 @@ export default function TaxPage() {
         <div>
           <h1 className="text-2xl font-bold text-zinc-900">Tax Reserve</h1>
           <p className="text-sm text-zinc-500 mt-1">
-            AI-estimated quarterly tax obligations and reserve recommendations
+            AI-estimated quarterly tax obligations with full calculation transparency
           </p>
         </div>
         <button
@@ -231,36 +293,28 @@ export default function TaxPage() {
                   <DollarSign className="h-4 w-4 text-zinc-500" />
                   <span className="text-xs font-medium text-zinc-500 uppercase">Monthly Set-Aside</span>
                 </div>
-                <p className="text-2xl font-bold text-zinc-900">
-                  {fmt(tax.summary.monthly_set_aside)}
-                </p>
+                <p className="text-2xl font-bold text-zinc-900">{fmt(tax.summary.monthly_set_aside)}</p>
               </div>
               <div className="rounded-xl border border-orange-200 bg-orange-50 p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Calendar className="h-4 w-4 text-orange-600" />
                   <span className="text-xs font-medium text-orange-600 uppercase">Quarterly Payment</span>
                 </div>
-                <p className="text-2xl font-bold text-orange-700">
-                  {fmt(tax.tax_estimates.quarterly_payment)}
-                </p>
+                <p className="text-2xl font-bold text-orange-700">{fmt(tax.tax_estimates.quarterly_payment)}</p>
               </div>
               <div className="rounded-xl border border-red-200 bg-red-50 p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Landmark className="h-4 w-4 text-red-600" />
                   <span className="text-xs font-medium text-red-600 uppercase">Est. Annual Tax</span>
                 </div>
-                <p className="text-2xl font-bold text-red-700">
-                  {fmt(tax.tax_estimates.us_federal?.total_federal || 0)}
-                </p>
+                <p className="text-2xl font-bold text-red-700">{fmt(tax.tax_estimates.us_federal?.total_federal || 0)}</p>
               </div>
               <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <TrendingDown className="h-4 w-4 text-blue-600" />
                   <span className="text-xs font-medium text-blue-600 uppercase">Effective Rate</span>
                 </div>
-                <p className="text-2xl font-bold text-blue-700">
-                  {pct(tax.summary.total_tax_burden_pct)}
-                </p>
+                <p className="text-2xl font-bold text-blue-700">{pct(tax.summary.total_tax_burden_pct)}</p>
               </div>
             </div>
           )}
@@ -270,55 +324,248 @@ export default function TaxPage() {
             <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
               <div className="border-b border-zinc-200 px-6 py-4">
                 <h2 className="text-base font-semibold text-zinc-900">Income Summary</h2>
+                {tax.income_summary.projection_method && (
+                  <p className="text-xs text-zinc-400 mt-1">{tax.income_summary.projection_method}</p>
+                )}
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-zinc-100">
                 <div className="p-6">
                   <p className="text-xs font-medium text-zinc-500 uppercase mb-1">Gross Income (YTD)</p>
                   <p className="text-xl font-bold text-zinc-900">{fmt(tax.income_summary.gross_income_ytd)}</p>
-                  <p className="text-xs text-zinc-400 mt-1">Projected: {fmt(tax.income_summary.projected_annual_income)}</p>
+                  <p className="text-xs text-zinc-400 mt-1">Projected annual: {fmt(tax.income_summary.projected_annual_income)}</p>
                 </div>
                 <div className="p-6">
                   <p className="text-xs font-medium text-zinc-500 uppercase mb-1">Expenses (YTD)</p>
                   <p className="text-xl font-bold text-zinc-900">{fmt(tax.income_summary.total_expenses_ytd)}</p>
-                  <p className="text-xs text-zinc-400 mt-1">Projected: {fmt(tax.income_summary.projected_annual_expenses)}</p>
+                  <p className="text-xs text-zinc-400 mt-1">Projected annual: {fmt(tax.income_summary.projected_annual_expenses)}</p>
                 </div>
                 <div className="p-6">
                   <p className="text-xs font-medium text-zinc-500 uppercase mb-1">Net Income (YTD)</p>
                   <p className="text-xl font-bold text-emerald-700">{fmt(tax.income_summary.net_income_ytd)}</p>
-                  <p className="text-xs text-zinc-400 mt-1">Projected: {fmt(tax.income_summary.projected_net_income)}</p>
+                  <p className="text-xs text-zinc-400 mt-1">Projected annual: {fmt(tax.income_summary.projected_net_income)}</p>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Tax Breakdown */}
-          {tax.tax_estimates?.us_federal && (
-            <div className="rounded-xl border border-zinc-200 bg-white overflow-hidden">
-              <div className="border-b border-zinc-200 px-6 py-4">
-                <h2 className="text-base font-semibold text-zinc-900">Federal Tax Breakdown</h2>
-              </div>
-              <div className="p-6 space-y-3">
-                <div className="flex justify-between items-center py-2">
-                  <span className="text-sm text-zinc-600">Taxable Income</span>
-                  <span className="text-sm font-medium text-zinc-900">{fmt(tax.tax_estimates.us_federal.taxable_income)}</span>
+          {/* Full Tax Calculation Breakdown */}
+          {tax.tax_calculation_steps && (
+            <div className="rounded-xl border border-indigo-200 bg-white overflow-hidden">
+              <button
+                onClick={() => setShowCalcSteps(!showCalcSteps)}
+                className="w-full border-b border-indigo-100 px-6 py-4 flex items-center justify-between hover:bg-indigo-50/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Calculator className="h-5 w-5 text-indigo-600" />
+                  <h2 className="text-base font-semibold text-zinc-900">Full Tax Calculation Breakdown</h2>
+                  <span className="text-xs text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full font-medium">Step-by-step</span>
                 </div>
-                <div className="flex justify-between items-center py-2 border-t border-zinc-50">
-                  <span className="text-sm text-zinc-600">Federal Income Tax</span>
-                  <span className="text-sm font-medium text-zinc-900">{fmt(tax.tax_estimates.us_federal.estimated_tax)}</span>
+                {showCalcSteps ? (
+                  <ChevronUp className="h-5 w-5 text-zinc-400" />
+                ) : (
+                  <ChevronDown className="h-5 w-5 text-zinc-400" />
+                )}
+              </button>
+
+              {showCalcSteps && (
+                <div className="p-6 space-y-1">
+                  {/* Step 1: Gross Income */}
+                  {tax.tax_calculation_steps.step_1_gross_income && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 1: {tax.tax_calculation_steps.step_1_gross_income.description}</p>
+                      </div>
+                      <span className="text-sm font-semibold text-zinc-900 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_1_gross_income.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 2: Deductions */}
+                  {tax.tax_calculation_steps.step_2_deductions && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 2: {tax.tax_calculation_steps.step_2_deductions.description}</p>
+                        {tax.tax_calculation_steps.step_2_deductions.items_summary && (
+                          <p className="text-xs text-zinc-400 mt-0.5">{tax.tax_calculation_steps.step_2_deductions.items_summary}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-semibold text-red-600 tabular-nums">-{fmtExact(tax.tax_calculation_steps.step_2_deductions.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 3: Net SE Income */}
+                  {tax.tax_calculation_steps.step_3_net_self_employment_income && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-200 bg-zinc-50 -mx-6 px-6">
+                      <div>
+                        <p className="text-sm font-semibold text-zinc-900">Step 3: {tax.tax_calculation_steps.step_3_net_self_employment_income.description}</p>
+                        {tax.tax_calculation_steps.step_3_net_self_employment_income.formula && (
+                          <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_3_net_self_employment_income.formula}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-bold text-zinc-900 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_3_net_self_employment_income.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 4: SE Tax Base */}
+                  {tax.tax_calculation_steps.step_4_se_tax_base && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 4: {tax.tax_calculation_steps.step_4_se_tax_base.description}</p>
+                        {tax.tax_calculation_steps.step_4_se_tax_base.formula && (
+                          <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_4_se_tax_base.formula}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-semibold text-zinc-900 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_4_se_tax_base.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 5: SE Tax */}
+                  {tax.tax_calculation_steps.step_5_se_tax && (
+                    <div className="py-3 border-b border-zinc-100">
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <p className="text-sm font-medium text-zinc-900">Step 5: {tax.tax_calculation_steps.step_5_se_tax.description}</p>
+                          {tax.tax_calculation_steps.step_5_se_tax.formula && (
+                            <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_5_se_tax.formula}</p>
+                          )}
+                        </div>
+                        <span className="text-sm font-semibold text-red-700 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_5_se_tax.amount)}</span>
+                      </div>
+                      {(tax.tax_calculation_steps.step_5_se_tax.social_security !== undefined || tax.tax_calculation_steps.step_5_se_tax.medicare !== undefined) && (
+                        <div className="mt-2 ml-4 space-y-1 text-xs text-zinc-500">
+                          {tax.tax_calculation_steps.step_5_se_tax.social_security !== undefined && (
+                            <div className="flex justify-between">
+                              <span>Social Security (12.4%): <span className="font-mono text-zinc-400">{tax.tax_calculation_steps.step_5_se_tax.social_security_formula}</span></span>
+                              <span className="tabular-nums">{fmtExact(tax.tax_calculation_steps.step_5_se_tax.social_security)}</span>
+                            </div>
+                          )}
+                          {tax.tax_calculation_steps.step_5_se_tax.medicare !== undefined && (
+                            <div className="flex justify-between">
+                              <span>Medicare (2.9%): <span className="font-mono text-zinc-400">{tax.tax_calculation_steps.step_5_se_tax.medicare_formula}</span></span>
+                              <span className="tabular-nums">{fmtExact(tax.tax_calculation_steps.step_5_se_tax.medicare)}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Step 6: SE Deduction */}
+                  {tax.tax_calculation_steps.step_6_se_deduction && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 6: {tax.tax_calculation_steps.step_6_se_deduction.description}</p>
+                        {tax.tax_calculation_steps.step_6_se_deduction.formula && (
+                          <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_6_se_deduction.formula}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-semibold text-zinc-900 tabular-nums">-{fmtExact(tax.tax_calculation_steps.step_6_se_deduction.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 7: AGI */}
+                  {tax.tax_calculation_steps.step_7_adjusted_gross_income && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 7: {tax.tax_calculation_steps.step_7_adjusted_gross_income.description}</p>
+                        {tax.tax_calculation_steps.step_7_adjusted_gross_income.formula && (
+                          <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_7_adjusted_gross_income.formula}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-semibold text-zinc-900 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_7_adjusted_gross_income.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 8: Standard Deduction */}
+                  {tax.tax_calculation_steps.step_8_standard_deduction && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 8: {tax.tax_calculation_steps.step_8_standard_deduction.description}</p>
+                        {tax.tax_calculation_steps.step_8_standard_deduction.note && (
+                          <p className="text-xs text-zinc-400 mt-0.5">{tax.tax_calculation_steps.step_8_standard_deduction.note}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-semibold text-zinc-900 tabular-nums">-{fmtExact(tax.tax_calculation_steps.step_8_standard_deduction.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 9: Taxable Income */}
+                  {tax.tax_calculation_steps.step_9_taxable_income && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-200 bg-zinc-50 -mx-6 px-6">
+                      <div>
+                        <p className="text-sm font-semibold text-zinc-900">Step 9: {tax.tax_calculation_steps.step_9_taxable_income.description}</p>
+                        {tax.tax_calculation_steps.step_9_taxable_income.formula && (
+                          <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_9_taxable_income.formula}</p>
+                        )}
+                      </div>
+                      <span className="text-sm font-bold text-zinc-900 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_9_taxable_income.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 10: Tax Brackets */}
+                  {tax.tax_calculation_steps.step_10_federal_tax_brackets && tax.tax_calculation_steps.step_10_federal_tax_brackets.length > 0 && (
+                    <div className="py-3 border-b border-zinc-100">
+                      <p className="text-sm font-semibold text-zinc-900 mb-3">Step 10: Federal Income Tax by Bracket</p>
+                      <div className="rounded-lg border border-zinc-200 overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="bg-zinc-50 border-b border-zinc-200">
+                              <th className="text-left px-4 py-2 font-medium text-zinc-500">Bracket</th>
+                              <th className="text-left px-4 py-2 font-medium text-zinc-500">Range</th>
+                              <th className="text-right px-4 py-2 font-medium text-zinc-500">Taxable</th>
+                              <th className="text-right px-4 py-2 font-medium text-zinc-500">Tax</th>
+                              <th className="text-left px-4 py-2 font-medium text-zinc-500">Formula</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {tax.tax_calculation_steps.step_10_federal_tax_brackets.map((b, idx) => (
+                              <tr key={idx} className={`border-b border-zinc-50 ${b.taxable_in_bracket > 0 ? "" : "opacity-40"}`}>
+                                <td className="px-4 py-2 font-semibold text-zinc-900">{b.bracket}</td>
+                                <td className="px-4 py-2 text-zinc-500">
+                                  {fmt(b.range_low)} - {typeof b.range_high === "number" ? fmt(b.range_high) : b.range_high}
+                                </td>
+                                <td className="px-4 py-2 text-right font-medium text-zinc-700 tabular-nums">{fmtExact(b.taxable_in_bracket)}</td>
+                                <td className="px-4 py-2 text-right font-semibold text-red-700 tabular-nums">{fmtExact(b.tax_from_bracket)}</td>
+                                <td className="px-4 py-2 text-zinc-400 font-mono">{b.formula}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Step 11: Total Federal Income Tax */}
+                  {tax.tax_calculation_steps.step_11_total_federal_income_tax && (
+                    <div className="flex justify-between items-center py-3 border-b border-zinc-100">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">Step 11: {tax.tax_calculation_steps.step_11_total_federal_income_tax.description}</p>
+                      </div>
+                      <span className="text-sm font-semibold text-red-700 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_11_total_federal_income_tax.amount)}</span>
+                    </div>
+                  )}
+
+                  {/* Step 12: Total Tax */}
+                  {tax.tax_calculation_steps.step_12_total_tax && (
+                    <div className="flex justify-between items-center py-4 bg-indigo-50 -mx-6 px-6 rounded-b-lg mt-2">
+                      <div>
+                        <p className="text-sm font-bold text-indigo-900">Step 12: {tax.tax_calculation_steps.step_12_total_tax.description}</p>
+                        {tax.tax_calculation_steps.step_12_total_tax.formula && (
+                          <p className="text-xs text-indigo-600 font-mono mt-0.5">{tax.tax_calculation_steps.step_12_total_tax.formula}</p>
+                        )}
+                        {tax.tax_calculation_steps.step_12_total_tax.effective_rate_formula && (
+                          <p className="text-xs text-indigo-500 font-mono mt-0.5">Effective rate: {tax.tax_calculation_steps.step_12_total_tax.effective_rate_formula}</p>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <span className="text-lg font-bold text-indigo-900 tabular-nums">{fmtExact(tax.tax_calculation_steps.step_12_total_tax.amount)}</span>
+                        {tax.tax_calculation_steps.step_12_total_tax.effective_rate !== undefined && (
+                          <p className="text-xs font-semibold text-indigo-600">{pct(tax.tax_calculation_steps.step_12_total_tax.effective_rate)} effective</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <div className="flex justify-between items-center py-2 border-t border-zinc-50">
-                  <span className="text-sm text-zinc-600">Self-Employment Tax (15.3%)</span>
-                  <span className="text-sm font-medium text-zinc-900">{fmt(tax.tax_estimates.us_federal.self_employment_tax)}</span>
-                </div>
-                <div className="flex justify-between items-center py-3 border-t-2 border-zinc-200">
-                  <span className="text-sm font-semibold text-zinc-900">Total Federal Tax</span>
-                  <span className="text-lg font-bold text-red-700">{fmt(tax.tax_estimates.us_federal.total_federal)}</span>
-                </div>
-                <div className="flex justify-between items-center py-2 border-t border-zinc-50">
-                  <span className="text-sm text-zinc-600">Effective Tax Rate</span>
-                  <span className="text-sm font-medium text-blue-700">{pct(tax.tax_estimates.us_federal.effective_rate)}</span>
-                </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -333,10 +580,7 @@ export default function TaxPage() {
                   const config = statusConfig[q.status] || statusConfig.upcoming;
                   const StatusIcon = config.icon;
                   return (
-                    <div
-                      key={idx}
-                      className={`rounded-xl border p-4 ${config.bg} ${config.border}`}
-                    >
+                    <div key={idx} className={`rounded-xl border p-4 ${config.bg} ${config.border}`}>
                       <div className="flex items-center justify-between mb-3">
                         <span className={`text-lg font-bold ${config.text}`}>{q.quarter}</span>
                         <StatusIcon className={`h-5 w-5 ${config.text}`} />
@@ -344,9 +588,7 @@ export default function TaxPage() {
                       <p className="text-2xl font-bold text-zinc-900">{fmt(q.amount_due)}</p>
                       <p className="text-xs text-zinc-500 mt-1">Due: {q.due_date}</p>
                       <div className="mt-2">
-                        <span
-                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${config.text} ${config.bg} ring-1 ring-inset ${config.border}`}
-                        >
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${config.text} ${config.bg} ring-1 ring-inset ${config.border}`}>
                           {config.label}
                           {q.days_until_due !== null && q.status === "upcoming" && ` (${q.days_until_due}d)`}
                           {q.days_until_due !== null && q.status === "overdue" && ` (${Math.abs(q.days_until_due)}d late)`}
@@ -377,16 +619,37 @@ export default function TaxPage() {
                   </thead>
                   <tbody>
                     {tax.deductions.map((d, idx) => (
-                      <tr key={idx} className="border-b border-zinc-50 hover:bg-zinc-50 transition-colors">
-                        <td className="px-6 py-3 font-medium text-zinc-900">{d.category}</td>
-                        <td className="px-6 py-3 text-right text-zinc-700">{fmt(d.amount_ytd)}</td>
-                        <td className="px-6 py-3 text-right text-zinc-700">{fmt(d.projected_annual)}</td>
-                        <td className="px-6 py-3 text-center">
-                          <span className={`text-xs font-medium capitalize ${confidenceColors[d.confidence] || "text-zinc-500"}`}>
-                            {d.confidence}
-                          </span>
-                        </td>
-                      </tr>
+                      <>
+                        <tr
+                          key={idx}
+                          className={`border-b border-zinc-50 hover:bg-zinc-50 transition-colors ${d.items && d.items.length > 0 ? "cursor-pointer" : ""}`}
+                          onClick={() => d.items && d.items.length > 0 && toggleDeduction(idx)}
+                        >
+                          <td className="px-6 py-3 font-medium text-zinc-900">
+                            <div className="flex items-center gap-2">
+                              {d.items && d.items.length > 0 && (
+                                expandedDeductions[idx] ? <ChevronUp className="h-3 w-3 text-zinc-400" /> : <ChevronDown className="h-3 w-3 text-zinc-400" />
+                              )}
+                              {d.category}
+                            </div>
+                          </td>
+                          <td className="px-6 py-3 text-right text-zinc-700">{fmt(d.amount_ytd)}</td>
+                          <td className="px-6 py-3 text-right text-zinc-700">{fmt(d.projected_annual)}</td>
+                          <td className="px-6 py-3 text-center">
+                            <span className={`text-xs font-medium capitalize ${confidenceColors[d.confidence] || "text-zinc-500"}`}>
+                              {d.confidence}
+                            </span>
+                          </td>
+                        </tr>
+                        {expandedDeductions[idx] && d.items && d.items.map((item, iIdx) => (
+                          <tr key={`${idx}-${iIdx}`} className="bg-zinc-50/50">
+                            <td className="px-6 py-2 pl-12 text-xs text-zinc-500">{item.name}</td>
+                            <td className="px-6 py-2 text-right text-xs text-zinc-500">{fmt(item.amount)}</td>
+                            <td className="px-6 py-2" />
+                            <td className="px-6 py-2" />
+                          </tr>
+                        ))}
+                      </>
                     ))}
                   </tbody>
                 </table>
@@ -430,9 +693,9 @@ export default function TaxPage() {
           {/* Disclaimer */}
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
             <p className="text-xs text-amber-800">
-              <span className="font-semibold">Disclaimer:</span> These tax estimates are for planning purposes only and are not professional tax advice. 
-              Fynn provides financial intelligence for informational purposes. Consult a qualified tax professional or CPA for 
-              official tax preparation and filing. Actual tax obligations may vary based on filing status, state taxes, additional 
+              <span className="font-semibold">Disclaimer:</span> These tax estimates are for planning purposes only and are not professional tax advice.
+              Fynn provides financial intelligence for informational purposes. Consult a qualified tax professional or CPA for
+              official tax preparation and filing. Actual tax obligations may vary based on filing status, state taxes, additional
               income sources, and other factors not captured here.
             </p>
           </div>
