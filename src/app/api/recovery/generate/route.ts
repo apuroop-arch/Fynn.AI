@@ -68,8 +68,14 @@ export async function POST(req: NextRequest) {
       : "Business Owner";
     const senderEmail = clerkUser?.emailAddresses[0]?.emailAddress ?? "";
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const inv = invoice as any;
+    const invoiceNumber = inv.invoice_number || `INV-${inv.id.slice(0, 8).toUpperCase()}`;
+    const paidAmount = inv.paid_amount || 0;
+    const outstandingBalance = inv.amount - paidAmount;
+
     const daysOverdue = Math.floor(
-      (Date.now() - new Date(invoice.due_date).getTime()) / (1000 * 60 * 60 * 24)
+      (Date.now() - new Date(inv.due_date).getTime()) / (1000 * 60 * 60 * 24)
     );
 
     const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -89,20 +95,20 @@ SENDER INFO:
 - Email: ${senderEmail}
 
 INVOICE DETAILS:
-- Client: ${invoice.client_name}
-- Invoice Number: ${invoice.invoice_number || `INV-${invoice.id.slice(0, 8).toUpperCase()}`}
-- Invoice Amount: $${invoice.amount} ${invoice.currency}
-- Issued: ${invoice.issued_date}
-- Due Date: ${invoice.due_date}
+- Client: ${inv.client_name}
+- Invoice Number: ${invoiceNumber}
+- Invoice Amount: $${inv.amount} ${inv.currency}
+- Issued: ${inv.issued_date}
+- Due Date: ${inv.due_date}
 - Days Overdue: ${daysOverdue}
-- Amount Paid: $${invoice.paid_amount || 0}
-- Outstanding Balance: $${invoice.amount - (invoice.paid_amount || 0)}
+- Amount Paid: $${paidAmount}
+- Outstanding Balance: $${outstandingBalance}
 
 Generate a 3-email recovery sequence with escalating tone.
 
 CRITICAL RULES:
 - Each email MUST be 60-100 words in the body. No more. Be direct and concise.
-- Use the ACTUAL invoice number "${invoice.invoice_number || `INV-${invoice.id.slice(0, 8).toUpperCase()}`}" — never use placeholders like #[Invoice Number].
+- Use the ACTUAL invoice number "${invoiceNumber}" — never use placeholders like #[Invoice Number].
 - Use proper HTML formatting: wrap paragraphs in <p> tags. No raw text.
 - Sign off with the sender's name and email.
 - No filler sentences. Every sentence must serve a purpose.
