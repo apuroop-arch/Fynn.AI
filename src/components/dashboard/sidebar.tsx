@@ -17,7 +17,7 @@ const navItems = [
   { label: "Leakage Detector", href: "/dashboard/leakage", icon: SearchX },
   { label: "Invoice Recovery", href: "/dashboard/recovery", icon: MailCheck },
   {
-    label: "Client Profitability",
+    label: "Profitability",
     href: "/dashboard/profitability",
     icon: Users,
   },
