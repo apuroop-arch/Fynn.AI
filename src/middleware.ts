@@ -1,8 +1,23 @@
-import { clerkMiddleware } from "@clerk/nextjs/server";
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
 
-// Initialize Clerk session on all matched routes.
-// Route-level protection is handled in src/app/dashboard/layout.tsx
-export default clerkMiddleware();
+// These routes are accessible WITHOUT logging in
+const isPublicRoute = createRouteMatcher([
+  "/",                    // Landing page
+  "/demo",                // Demo mode
+  "/pricing",             // Pricing page
+  "/privacy",             // Privacy policy
+  "/terms",               // Terms of service
+  "/sign-in(.*)",         // Sign in
+  "/sign-up(.*)",         // Sign up
+  "/api/webhooks(.*)",    // Stripe & Clerk webhooks
+]);
+
+// Everything else requires authentication
+export default clerkMiddleware(async (auth, request) => {
+  if (!isPublicRoute(request)) {
+    await auth.protect();
+  }
+});
 
 export const config = {
   matcher: [
