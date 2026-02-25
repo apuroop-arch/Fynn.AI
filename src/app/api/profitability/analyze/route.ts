@@ -59,7 +59,7 @@ export async function POST() {
     const anthropic = new Anthropic({ apiKey });
     const today = new Date().toISOString().split("T")[0];
 
-    const prompt = `You are a financial analyst specializing in client profitability for freelancers and SMBs. Analyze the following data and rank clients by true profitability.
+    const prompt = `You are a financial analyst specializing in profitability analysis for businesses of all sizes — freelancers, agencies, SMBs, and mid-market companies. Analyze the following data and rank clients/revenue streams by true profitability.
 
 TODAY'S DATE: ${today}
 
@@ -135,3 +135,4 @@ Return ONLY valid JSON. No markdown fences. No extra text.`;
     );
   }
 }
+
