@@ -98,16 +98,18 @@ export default function BriefingPage() {
     }
   };
 
-  // BEFORE (your original — causes $NaN)
-const fmt = (n: number) =>
-  new Intl.NumberFormat("en-US", { ... }).format(n);
+  const fmt = (n: number | null | undefined) => {
+    const val = Number(n);
+    if (isNaN(val)) return "$0";
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      maximumFractionDigits: 0,
+    }).format(val);
+  };
 
-// AFTER (fixed)
-const fmt = (n: number | null | undefined) => {
-  const val = Number(n);
-  if (isNaN(val)) return "$0";
-  return new Intl.NumberFormat("en-US", { ... }).format(val);
-};
+  const copyNarrative = async () => {
+    if (data?.briefing?.full_narrative) {
       await navigator.clipboard.writeText(data.briefing.full_narrative);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
