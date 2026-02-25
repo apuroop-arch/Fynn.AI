@@ -82,7 +82,7 @@ export async function POST(req: NextRequest) {
 
     const anthropic = new Anthropic({ apiKey });
 
-    const prompt = `You are a professional accounts receivable specialist writing recovery emails for a freelancer/SMB owner.
+    const prompt = `You are a professional accounts receivable specialist. Write concise, direct recovery emails for a freelancer/SMB owner.
 
 SENDER INFO:
 - Name: ${senderName}
@@ -90,28 +90,36 @@ SENDER INFO:
 
 INVOICE DETAILS:
 - Client: ${invoice.client_name}
-- Invoice Amount: $${invoice.amount}
-- Currency: ${invoice.currency}
+- Invoice Number: ${invoice.invoice_number || `INV-${invoice.id.slice(0, 8).toUpperCase()}`}
+- Invoice Amount: $${invoice.amount} ${invoice.currency}
 - Issued: ${invoice.issued_date}
 - Due Date: ${invoice.due_date}
 - Days Overdue: ${daysOverdue}
-- Amount Paid: $${invoice.paid_amount}
-- Outstanding Balance: $${invoice.amount - invoice.paid_amount}
+- Amount Paid: $${invoice.paid_amount || 0}
+- Outstanding Balance: $${invoice.amount - (invoice.paid_amount || 0)}
 
-Generate a 3-email recovery sequence with escalating tone:
+Generate a 3-email recovery sequence with escalating tone.
 
-1. Email 1 (Friendly Reminder) — Warm, assumes oversight. Sent at 30 days overdue.
-2. Email 2 (Professional Follow-up) — Firmer, references prior email. Sent at 45 days overdue.
-3. Email 3 (Final Notice) — Firm, mentions potential consequences. Sent at 60 days overdue.
+CRITICAL RULES:
+- Each email MUST be 60-100 words in the body. No more. Be direct and concise.
+- Use the ACTUAL invoice number "${invoice.invoice_number || `INV-${invoice.id.slice(0, 8).toUpperCase()}`}" — never use placeholders like #[Invoice Number].
+- Use proper HTML formatting: wrap paragraphs in <p> tags. No raw text.
+- Sign off with the sender's name and email.
+- No filler sentences. Every sentence must serve a purpose.
 
-For each email, provide:
+SEQUENCE:
+1. Email 1 (Friendly Reminder) — Warm, assumes oversight. ~70 words.
+2. Email 2 (Professional Follow-up) — Firmer, references prior email, requests specific payment date. ~80 words.
+3. Email 3 (Final Notice) — Firm, mentions consequences (collections, late fees). ~90 words.
+
+Return ONLY a valid JSON array of 3 objects with these fields:
 - sequence_number (1, 2, or 3)
-- subject_line
-- body (professional HTML-ready text with paragraphs)
+- subject_line (concise, includes invoice number or amount)
+- body (HTML formatted with <p> tags — NO raw text, NO markdown)
 - tone ("friendly", "professional", or "firm")
-- tone_assessment (brief explanation of the tone strategy)
+- tone_assessment (one sentence explaining the tone strategy)
 
-Return ONLY a JSON array of 3 objects. No markdown wrapping.`;
+Return ONLY the JSON array. No markdown code fences. No extra text.`;
 
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",

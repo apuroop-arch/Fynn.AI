@@ -21,9 +21,20 @@ interface RecoveryEmail {
 interface Invoice {
   id: string;
   client_name: string;
+  invoice_number?: string;
   amount: number;
   currency: string;
   due_date: string;
+}
+
+// Helper to strip HTML tags for plain text (clipboard & Gmail)
+function stripHtml(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 const toneColors = {
@@ -70,7 +81,8 @@ export default function RecoveryPage() {
   };
 
   const copyToClipboard = async (email: RecoveryEmail, idx: number) => {
-    const text = `Subject: ${email.subject_line}\n\n${email.body}`;
+    const plainBody = stripHtml(email.body);
+    const text = `Subject: ${email.subject_line}\n\n${plainBody}`;
     await navigator.clipboard.writeText(text);
     setCopiedIdx(idx);
     setTimeout(() => setCopiedIdx(null), 2000);
@@ -78,7 +90,8 @@ export default function RecoveryPage() {
 
   const openGmail = (email: RecoveryEmail) => {
     const subject = encodeURIComponent(email.subject_line);
-    const body = encodeURIComponent(email.body);
+    const plainBody = stripHtml(email.body);
+    const body = encodeURIComponent(plainBody);
     window.open(
       `https://mail.google.com/mail/?view=cm&su=${subject}&body=${body}`,
       "_blank"
@@ -140,7 +153,7 @@ export default function RecoveryPage() {
                 {invoice.client_name}
               </p>
               <p className="text-xs text-zinc-500">
-                Due: {invoice.due_date} | {invoice.currency}{" "}
+                {invoice.invoice_number && `${invoice.invoice_number} | `}Due: {invoice.due_date} | {invoice.currency}{" "}
                 {invoice.amount.toFixed(2)}
               </p>
             </div>
@@ -178,9 +191,10 @@ export default function RecoveryPage() {
               </div>
 
               <div className="px-6 py-4">
-                <div className="prose prose-sm max-w-none text-zinc-700 whitespace-pre-wrap">
-                  {email.body}
-                </div>
+                <div
+                  className="prose prose-sm max-w-none text-zinc-700 [&>p]:mb-3 [&>p:last-child]:mb-0"
+                  dangerouslySetInnerHTML={{ __html: email.body }}
+                />
               </div>
 
               <div className="flex items-center gap-2 border-t border-zinc-100 px-6 py-3">
