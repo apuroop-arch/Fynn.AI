@@ -120,11 +120,11 @@ export default function ProfitabilityPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900">
-            Client Profitability
+            Profitability
           </h1>
           <p className="text-sm text-zinc-500 mt-1">
-            AI-powered analysis of true profitability, health scores, and client
-            portfolio insights
+            AI-powered profitability analysis with health scores, rankings, and
+            actionable insights
           </p>
         </div>
         <button
