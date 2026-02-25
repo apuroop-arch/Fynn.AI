@@ -19,68 +19,20 @@ export interface NormalizedTransaction {
 
 export type FileType = "csv" | "xlsx" | "xls" | "pdf";
 
-const DATE_FORMATS = [
-  // MM/DD/YYYY
-  /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/,
-  // DD-MM-YYYY
-  /^(\d{1,2})-(\d{1,2})-(\d{4})$/,
-  // YYYY-MM-DD (already normalized)
-  /^(\d{4})-(\d{1,2})-(\d{1,2})$/,
-  // MM-DD-YYYY
-  /^(\d{1,2})-(\d{1,2})-(\d{4})$/,
-];
-
-function normalizeDate(raw: string): string {
-  const trimmed = raw.trim();
-
-  // Try YYYY-MM-DD first
-  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(trimmed)) {
-    const [y, m, d] = trimmed.split("-");
-    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  }
-
-  // Try MM/DD/YYYY
-  const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slashMatch) {
-    const [, m, d, y] = slashMatch;
-    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  }
-
-  // Try DD-MM-YYYY or MM-DD-YYYY (assume MM-DD-YYYY)
-  const dashMatch = trimmed.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
-  if (dashMatch) {
-    const [, m, d, y] = dashMatch;
-    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  }
-
-  // Fallback: try native Date parsing
-  const parsed = new Date(trimmed);
-  if (!isNaN(parsed.getTime())) {
-    return parsed.toISOString().split("T")[0];
-  }
-
-  throw new Error(`Cannot parse date: ${raw}`);
-}
-
-function normalizeAmount(raw: string | number): {
-  amount: number;
-  type: "credit" | "debit";
-} {
-  const str = String(raw).replace(/[$,\s]/g, "").trim();
-  const num = parseFloat(str);
-
-  if (isNaN(num)) {
-    throw new Error(`Cannot parse amount: ${raw}`);
-  }
-
-  return {
-    amount: Math.abs(num),
-    type: num >= 0 ? "credit" : "debit",
-  };
+// ============================================================
+// DETECT FILE TYPE
+// ============================================================
+export function detectFileType(fileName: string): FileType | null {
+  const ext = fileName.split(".").pop()?.toLowerCase();
+  if (ext === "csv") return "csv";
+  if (ext === "xlsx") return "xlsx";
+  if (ext === "xls") return "xls";
+  if (ext === "pdf") return "pdf";
+  return null;
 }
 
 // ============================================================
-// CSV PARSING
+// CSV PARSING (client-side, for standard CSVs)
 // ============================================================
 export function parseCSV(csvText: string): Promise<RawTransaction[]> {
   return new Promise((resolve, reject) => {
@@ -106,140 +58,69 @@ export function parseCSV(csvText: string): Promise<RawTransaction[]> {
 }
 
 // ============================================================
-// EXCEL PARSING (client-side using SheetJS)
+// CHECK IF CSV HAS STANDARD HEADERS
+// Returns true if we can parse this locally without AI
 // ============================================================
-export async function parseExcel(
-  arrayBuffer: ArrayBuffer
-): Promise<RawTransaction[]> {
-  const XLSX = await import("xlsx");
-  const workbook = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
-
-  // Use the first sheet
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) {
-    throw new Error("Excel file has no sheets");
-  }
-
-  const sheet = workbook.Sheets[sheetName];
-  const jsonData = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-    raw: false,
-    defval: "",
-  });
-
-  if (jsonData.length === 0) {
-    throw new Error("Excel file has no data rows");
-  }
-
-  // Normalize headers — find date, description, amount columns
-  const firstRow = jsonData[0];
-  const headers = Object.keys(firstRow);
-  const headerMap = mapHeaders(headers);
-
-  return jsonData.map((row) => ({
-    date: String(row[headerMap.date] ?? ""),
-    description: String(row[headerMap.description] ?? ""),
-    amount: row[headerMap.amount] as string | number,
-    type: headerMap.type ? String(row[headerMap.type] ?? "") : undefined,
-    category: headerMap.category
-      ? String(row[headerMap.category] ?? "")
-      : undefined,
-  }));
-}
-
-// ============================================================
-// EXCEL TO CSV (for sending to the API)
-// ============================================================
-export async function excelToCSV(arrayBuffer: ArrayBuffer): Promise<string> {
-  const XLSX = await import("xlsx");
-  const workbook = XLSX.read(arrayBuffer, { type: "array", cellDates: true });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error("Excel file has no sheets");
-  const sheet = workbook.Sheets[sheetName];
-  return XLSX.utils.sheet_to_csv(sheet);
-}
-
-// ============================================================
-// HEADER MAPPING — fuzzy match column names
-// ============================================================
-interface HeaderMapping {
-  date: string;
-  description: string;
-  amount: string;
-  type?: string;
-  category?: string;
-}
-
-function mapHeaders(headers: string[]): HeaderMapping {
-  const lower = headers.map((h) => h.trim().toLowerCase().replace(/\s+/g, "_"));
-
-  const dateCol = findHeader(lower, headers, [
-    "date",
-    "transaction_date",
-    "trans_date",
-    "txn_date",
-    "posting_date",
-    "value_date",
-    "book_date",
-  ]);
-
-  const descCol = findHeader(lower, headers, [
-    "description",
-    "narration",
-    "particulars",
-    "details",
-    "memo",
-    "transaction_description",
-    "remarks",
-    "reference",
-  ]);
-
-  const amountCol = findHeader(lower, headers, [
-    "amount",
-    "transaction_amount",
-    "debit/credit",
-    "value",
-    "sum",
-    "total",
-  ]);
-
-  if (!dateCol || !descCol || !amountCol) {
-    throw new Error(
-      `Could not find required columns. Found: ${headers.join(", ")}. Need: date, description, amount`
-    );
-  }
-
-  const typeCol = findHeader(lower, headers, ["type", "transaction_type", "dr/cr", "debit_credit"]);
-  const catCol = findHeader(lower, headers, ["category", "group", "tag"]);
-
-  return {
-    date: dateCol,
-    description: descCol,
-    amount: amountCol,
-    type: typeCol || undefined,
-    category: catCol || undefined,
-  };
-}
-
-function findHeader(
-  lowerHeaders: string[],
-  originalHeaders: string[],
-  candidates: string[]
-): string | null {
-  for (const candidate of candidates) {
-    const idx = lowerHeaders.indexOf(candidate);
-    if (idx !== -1) return originalHeaders[idx];
-  }
-  // Partial match
-  for (const candidate of candidates) {
-    const idx = lowerHeaders.findIndex((h) => h.includes(candidate));
-    if (idx !== -1) return originalHeaders[idx];
-  }
-  return null;
+export function hasStandardHeaders(csvText: string): boolean {
+  const firstLine = csvText.split("\n")[0]?.toLowerCase() ?? "";
+  const hasDate = /\bdate\b/.test(firstLine);
+  const hasDesc = /\b(description|narration|particulars|details|memo)\b/.test(firstLine);
+  const hasAmount = /\b(amount|value|sum)\b/.test(firstLine);
+  return hasDate && hasDesc && hasAmount;
 }
 
 // ============================================================
 // NORMALIZE TRANSACTIONS (shared across all formats)
 // ============================================================
+function normalizeDate(raw: string): string {
+  const trimmed = raw.trim();
+
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(trimmed)) {
+    const [y, m, d] = trimmed.split("-");
+    return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+
+  // MM/DD/YYYY or DD/MM/YYYY
+  const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashMatch) {
+    const [, a, b, y] = slashMatch;
+    return `${y}-${a.padStart(2, "0")}-${b.padStart(2, "0")}`;
+  }
+
+  // DD-MM-YYYY or MM-DD-YYYY
+  const dashMatch = trimmed.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/);
+  if (dashMatch) {
+    const [, a, b, y] = dashMatch;
+    return `${y}-${a.padStart(2, "0")}-${b.padStart(2, "0")}`;
+  }
+
+  // Fallback: native Date parsing
+  const parsed = new Date(trimmed);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split("T")[0];
+  }
+
+  throw new Error(`Cannot parse date: ${raw}`);
+}
+
+function normalizeAmount(raw: string | number): {
+  amount: number;
+  type: "credit" | "debit";
+} {
+  const str = String(raw).replace(/[$,\s]/g, "").trim();
+  const num = parseFloat(str);
+
+  if (isNaN(num)) {
+    throw new Error(`Cannot parse amount: ${raw}`);
+  }
+
+  return {
+    amount: Math.abs(num),
+    type: num >= 0 ? "credit" : "debit",
+  };
+}
+
 export function normalizeTransactions(
   rows: RawTransaction[],
   currency: string = "USD"
@@ -267,16 +148,4 @@ export function normalizeTransactions(
       );
     }
   });
-}
-
-// ============================================================
-// DETECT FILE TYPE
-// ============================================================
-export function detectFileType(fileName: string): FileType | null {
-  const ext = fileName.split(".").pop()?.toLowerCase();
-  if (ext === "csv") return "csv";
-  if (ext === "xlsx") return "xlsx";
-  if (ext === "xls") return "xls";
-  if (ext === "pdf") return "pdf";
-  return null;
 }
