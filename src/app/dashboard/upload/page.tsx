@@ -9,49 +9,35 @@ import {
   Loader2,
   FileSpreadsheet,
   File,
+  Sparkles,
 } from "lucide-react";
 import type { NormalizedTransaction } from "@/lib/file-parser";
 
 type UploadStep = "select" | "parsing" | "preview" | "importing" | "done";
-type FileType = "csv" | "xlsx" | "xls" | "pdf";
 
-const FILE_TYPE_CONFIG: Record<
-  FileType,
-  { label: string; icon: typeof FileText; color: string }
-> = {
-  csv: { label: "CSV", icon: FileText, color: "text-emerald-600" },
-  xlsx: { label: "Excel", icon: FileSpreadsheet, color: "text-blue-600" },
-  xls: { label: "Excel", icon: FileSpreadsheet, color: "text-blue-600" },
-  pdf: { label: "PDF", icon: File, color: "text-red-600" },
-};
-
-function detectFileType(fileName: string): FileType | null {
-  const ext = fileName.split(".").pop()?.toLowerCase();
-  if (ext === "csv") return "csv";
-  if (ext === "xlsx") return "xlsx";
-  if (ext === "xls") return "xls";
-  if (ext === "pdf") return "pdf";
-  return null;
-}
+const ACCEPTED_EXTENSIONS = ".csv,.xlsx,.xls,.pdf";
 
 export default function UploadPage() {
   const [step, setStep] = useState<UploadStep>("select");
   const [fileName, setFileName] = useState("");
-  const [fileType, setFileType] = useState<FileType | null>(null);
+  const [fileExt, setFileExt] = useState("");
   const [csvText, setCsvText] = useState("");
   const [preview, setPreview] = useState<NormalizedTransaction[]>([]);
   const [error, setError] = useState("");
   const [resultMessage, setResultMessage] = useState("");
   const [currency, setCurrency] = useState("USD");
+  const [parsedByAI, setParsedByAI] = useState(false);
+  const [parseStatus, setParseStatus] = useState("");
 
   const handleFileSelect = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       setError("");
+      setParsedByAI(false);
       const file = e.target.files?.[0];
       if (!file) return;
 
-      const detectedType = detectFileType(file.name);
-      if (!detectedType) {
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+      if (!["csv", "xlsx", "xls", "pdf"].includes(ext)) {
         setError(
           "Unsupported file format. Please upload a CSV, Excel (.xlsx/.xls), or PDF file."
         );
@@ -59,87 +45,85 @@ export default function UploadPage() {
       }
 
       setFileName(file.name);
-      setFileType(detectedType);
+      setFileExt(ext);
 
-      try {
-        if (detectedType === "csv") {
-          await handleCSV(file);
-        } else if (detectedType === "xlsx" || detectedType === "xls") {
-          await handleExcel(file);
-        } else if (detectedType === "pdf") {
-          await handlePDF(file);
+      // For CSV, try local parsing first
+      if (ext === "csv") {
+        try {
+          setParseStatus("Reading file...");
+          setStep("parsing");
+          const text = await file.text();
+
+          const { hasStandardHeaders, parseCSV, normalizeTransactions } =
+            await import("@/lib/file-parser");
+
+          if (hasStandardHeaders(text)) {
+            // Standard CSV — parse locally (fast, no API cost)
+            setParseStatus("Parsing transactions...");
+            const raw = await parseCSV(text);
+            const normalized = normalizeTransactions(raw, currency);
+            setCsvText(text);
+            setPreview(normalized);
+            setStep("preview");
+            return;
+          }
+
+          // Non-standard CSV — fall through to AI
+        } catch {
+          // Local parse failed — fall through to AI
         }
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to parse file"
-        );
-        setStep("select");
       }
+
+      // For everything else (Excel, PDF, non-standard CSV) — use AI
+      await parseWithAI(file);
     },
     [currency]
   );
 
-  const handleCSV = async (file: File) => {
-    const text = await file.text();
-    setCsvText(text);
-
-    const { parseCSV, normalizeTransactions } = await import(
-      "@/lib/file-parser"
-    );
-    const raw = await parseCSV(text);
-    const normalized = normalizeTransactions(raw, currency);
-    setPreview(normalized);
-    setStep("preview");
-  };
-
-  const handleExcel = async (file: File) => {
+  const parseWithAI = async (file: File) => {
     setStep("parsing");
-    const arrayBuffer = await file.arrayBuffer();
+    setParsedByAI(true);
+    const ext = file.name.split(".").pop()?.toLowerCase();
 
-    const { parseExcel, excelToCSV, normalizeTransactions } = await import(
-      "@/lib/file-parser"
-    );
-
-    // Parse for preview
-    const raw = await parseExcel(arrayBuffer);
-    const normalized = normalizeTransactions(raw, currency);
-    setPreview(normalized);
-
-    // Convert to CSV for API upload
-    const csv = await excelToCSV(arrayBuffer);
-    setCsvText(csv);
-    setStep("preview");
-  };
-
-  const handlePDF = async (file: File) => {
-    setStep("parsing");
-
-    // Send PDF to server for AI extraction
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await fetch("/api/transactions/parse-pdf", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(data.error || "Failed to parse PDF");
+    if (ext === "pdf") {
+      setParseStatus("AI is reading your PDF statement...");
+    } else if (ext === "xlsx" || ext === "xls") {
+      setParseStatus("AI is analyzing your Excel statement...");
+    } else {
+      setParseStatus("AI is extracting transactions...");
     }
 
-    const extractedCSV = data.csvText;
-    setCsvText(extractedCSV);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
 
-    // Parse the extracted CSV for preview
-    const { parseCSV, normalizeTransactions } = await import(
-      "@/lib/file-parser"
-    );
-    const raw = await parseCSV(extractedCSV);
-    const normalized = normalizeTransactions(raw, currency);
-    setPreview(normalized);
-    setStep("preview");
+      const res = await fetch("/api/transactions/parse-file", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to parse file");
+      }
+
+      const extractedCSV = data.csvText;
+      setCsvText(extractedCSV);
+
+      // Parse the AI-extracted CSV for preview
+      setParseStatus("Preparing preview...");
+      const { parseCSV, normalizeTransactions } = await import(
+        "@/lib/file-parser"
+      );
+      const raw = await parseCSV(extractedCSV);
+      const normalized = normalizeTransactions(raw, currency);
+      setPreview(normalized);
+      setStep("preview");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to parse file");
+      setStep("select");
+    }
   };
 
   const handleImport = async () => {
@@ -170,15 +154,43 @@ export default function UploadPage() {
   const reset = () => {
     setStep("select");
     setFileName("");
-    setFileType(null);
+    setFileExt("");
     setCsvText("");
     setPreview([]);
     setError("");
     setResultMessage("");
+    setParsedByAI(false);
+    setParseStatus("");
   };
 
-  const typeConfig = fileType ? FILE_TYPE_CONFIG[fileType] : null;
-  const TypeIcon = typeConfig?.icon ?? FileText;
+  const fileIcon =
+    fileExt === "pdf"
+      ? File
+      : fileExt === "xlsx" || fileExt === "xls"
+      ? FileSpreadsheet
+      : FileText;
+  const FileIcon = fileIcon;
+
+  const fileColor =
+    fileExt === "pdf"
+      ? "text-red-600"
+      : fileExt === "xlsx" || fileExt === "xls"
+      ? "text-blue-600"
+      : "text-emerald-600";
+
+  const fileBadgeClass =
+    fileExt === "pdf"
+      ? "bg-red-50 text-red-700"
+      : fileExt === "xlsx" || fileExt === "xls"
+      ? "bg-blue-50 text-blue-700"
+      : "bg-emerald-50 text-emerald-700";
+
+  const fileLabel =
+    fileExt === "pdf"
+      ? "PDF"
+      : fileExt === "xlsx" || fileExt === "xls"
+      ? "Excel"
+      : "CSV";
 
   return (
     <div className="space-y-6">
@@ -210,12 +222,48 @@ export default function UploadPage() {
               onChange={(e) => setCurrency(e.target.value)}
               className="rounded-lg border border-zinc-300 px-3 py-2 text-sm text-zinc-900 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
             >
-              <option value="USD">USD</option>
-              <option value="EUR">EUR</option>
-              <option value="GBP">GBP</option>
-              <option value="INR">INR</option>
-              <option value="CAD">CAD</option>
-              <option value="AUD">AUD</option>
+              <option value="USD">USD — US Dollar</option>
+              <option value="EUR">EUR — Euro</option>
+              <option value="GBP">GBP — British Pound</option>
+              <option value="INR">INR — Indian Rupee</option>
+              <option value="CAD">CAD — Canadian Dollar</option>
+              <option value="AUD">AUD — Australian Dollar</option>
+              <option value="JPY">JPY — Japanese Yen</option>
+              <option value="CNY">CNY — Chinese Yuan</option>
+              <option value="SGD">SGD — Singapore Dollar</option>
+              <option value="AED">AED — UAE Dirham</option>
+              <option value="SAR">SAR — Saudi Riyal</option>
+              <option value="ZAR">ZAR — South African Rand</option>
+              <option value="BRL">BRL — Brazilian Real</option>
+              <option value="MXN">MXN — Mexican Peso</option>
+              <option value="KRW">KRW — South Korean Won</option>
+              <option value="THB">THB — Thai Baht</option>
+              <option value="NGN">NGN — Nigerian Naira</option>
+              <option value="KES">KES — Kenyan Shilling</option>
+              <option value="EGP">EGP — Egyptian Pound</option>
+              <option value="PKR">PKR — Pakistani Rupee</option>
+              <option value="BDT">BDT — Bangladeshi Taka</option>
+              <option value="PHP">PHP — Philippine Peso</option>
+              <option value="IDR">IDR — Indonesian Rupiah</option>
+              <option value="MYR">MYR — Malaysian Ringgit</option>
+              <option value="VND">VND — Vietnamese Dong</option>
+              <option value="CHF">CHF — Swiss Franc</option>
+              <option value="SEK">SEK — Swedish Krona</option>
+              <option value="NOK">NOK — Norwegian Krone</option>
+              <option value="DKK">DKK — Danish Krone</option>
+              <option value="PLN">PLN — Polish Zloty</option>
+              <option value="CZK">CZK — Czech Koruna</option>
+              <option value="HUF">HUF — Hungarian Forint</option>
+              <option value="RON">RON — Romanian Leu</option>
+              <option value="TRY">TRY — Turkish Lira</option>
+              <option value="ILS">ILS — Israeli Shekel</option>
+              <option value="NZD">NZD — New Zealand Dollar</option>
+              <option value="HKD">HKD — Hong Kong Dollar</option>
+              <option value="TWD">TWD — Taiwan Dollar</option>
+              <option value="CLP">CLP — Chilean Peso</option>
+              <option value="COP">COP — Colombian Peso</option>
+              <option value="PEN">PEN — Peruvian Sol</option>
+              <option value="ARS">ARS — Argentine Peso</option>
             </select>
           </div>
 
@@ -225,7 +273,7 @@ export default function UploadPage() {
               Click to upload bank statement
             </p>
             <p className="text-xs text-zinc-400 mt-1">
-              Supports CSV, Excel (.xlsx, .xls), and PDF formats
+              Works with any bank, any country, any format
             </p>
             <div className="flex items-center gap-3 mt-4">
               <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-700">
@@ -243,27 +291,24 @@ export default function UploadPage() {
             </div>
             <input
               type="file"
-              accept=".csv,.xlsx,.xls,.pdf"
+              accept={ACCEPTED_EXTENSIONS}
               className="hidden"
               onChange={handleFileSelect}
             />
           </label>
 
           <div className="mt-4 rounded-lg bg-zinc-50 border border-zinc-100 p-4">
-            <p className="text-xs font-medium text-zinc-600 mb-2">
-              File requirements
+            <div className="flex items-center gap-2 mb-2">
+              <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
+              <p className="text-xs font-medium text-zinc-600">
+                Universal AI-powered parser
+              </p>
+            </div>
+            <p className="text-xs text-zinc-500 leading-relaxed">
+              Fynn uses AI to automatically detect and extract transactions from
+              any bank statement format — HDFC, SBI, Chase, Barclays, DBS, and
+              hundreds more. Just upload and we handle the rest.
             </p>
-            <ul className="space-y-1 text-xs text-zinc-500">
-              <li>
-                <span className="font-medium text-zinc-600">CSV / Excel:</span>{" "}
-                Must have columns for date, description, and amount
-              </li>
-              <li>
-                <span className="font-medium text-zinc-600">PDF:</span>{" "}
-                Bank statement with transaction table — AI will extract
-                transactions automatically
-              </li>
-            </ul>
           </div>
         </div>
       )}
@@ -272,12 +317,8 @@ export default function UploadPage() {
       {step === "parsing" && (
         <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white py-16">
           <Loader2 className="h-8 w-8 text-emerald-600 animate-spin mb-4" />
-          <p className="text-sm font-medium text-zinc-600">
-            {fileType === "pdf"
-              ? "AI is extracting transactions from your PDF..."
-              : "Parsing your file..."}
-          </p>
-          {fileType === "pdf" && (
+          <p className="text-sm font-medium text-zinc-600">{parseStatus}</p>
+          {parsedByAI && (
             <p className="text-xs text-zinc-400 mt-1">
               This may take a few seconds
             </p>
@@ -290,25 +331,23 @@ export default function UploadPage() {
         <div className="rounded-xl border border-zinc-200 bg-white">
           <div className="flex items-center justify-between border-b border-zinc-200 px-6 py-4">
             <div className="flex items-center gap-2">
-              <TypeIcon
-                className={`h-5 w-5 ${typeConfig?.color ?? "text-zinc-400"}`}
-              />
+              <FileIcon className={`h-5 w-5 ${fileColor}`} />
               <span className="text-sm font-medium text-zinc-900">
                 {fileName}
               </span>
               <span
-                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-                  fileType === "pdf"
-                    ? "bg-red-50 text-red-700"
-                    : fileType === "xlsx" || fileType === "xls"
-                    ? "bg-blue-50 text-blue-700"
-                    : "bg-emerald-50 text-emerald-700"
-                }`}
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${fileBadgeClass}`}
               >
-                {typeConfig?.label}
+                {fileLabel}
               </span>
+              {parsedByAI && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 border border-violet-200 px-2 py-0.5 text-xs font-medium text-violet-700">
+                  <Sparkles className="h-3 w-3" />
+                  AI Extracted
+                </span>
+              )}
               <span className="text-xs text-zinc-400">
-                ({preview.length} rows)
+                ({preview.length} transactions)
               </span>
             </div>
             <div className="flex gap-2">
@@ -327,12 +366,12 @@ export default function UploadPage() {
             </div>
           </div>
 
-          {fileType === "pdf" && (
-            <div className="flex items-center gap-2 bg-amber-50 border-b border-amber-100 px-6 py-2.5">
-              <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-              <p className="text-xs text-amber-700">
-                Transactions were extracted from PDF using AI. Please review
-                before importing.
+          {parsedByAI && (
+            <div className="flex items-center gap-2 bg-violet-50 border-b border-violet-100 px-6 py-2.5">
+              <Sparkles className="h-3.5 w-3.5 text-violet-600 shrink-0" />
+              <p className="text-xs text-violet-700">
+                Transactions were extracted using AI. Please review before
+                importing.
               </p>
             </div>
           )}
@@ -352,9 +391,6 @@ export default function UploadPage() {
                   </th>
                   <th className="px-6 py-3 text-xs font-medium text-zinc-500 uppercase">
                     Type
-                  </th>
-                  <th className="px-6 py-3 text-xs font-medium text-zinc-500 uppercase">
-                    Category
                   </th>
                 </tr>
               </thead>
@@ -393,16 +429,13 @@ export default function UploadPage() {
                         {row.type}
                       </span>
                     </td>
-                    <td className="px-6 py-3 text-zinc-500">
-                      {row.category ?? "—"}
-                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
             {preview.length > 50 && (
               <p className="px-6 py-3 text-xs text-zinc-400">
-                Showing first 50 of {preview.length} rows
+                Showing first 50 of {preview.length} transactions
               </p>
             )}
           </div>
@@ -437,4 +470,3 @@ export default function UploadPage() {
     </div>
   );
 }
-
