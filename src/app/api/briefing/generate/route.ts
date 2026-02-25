@@ -64,12 +64,44 @@ export async function POST() {
     const dateFormatted = today.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
     // Calculate key metrics from data
-    const incomeTransactions = transactions?.filter((t: Record<string, unknown>) => Number(t.amount) > 0) ?? [];
-    const expenseTransactions = transactions?.filter((t: Record<string, unknown>) => Number(t.amount) < 0) ?? [];
-    const totalIncome = incomeTransactions.reduce((sum: number, t: Record<string, unknown>) => sum + Number(t.amount), 0);
-    const totalExpenses = Math.abs(expenseTransactions.reduce((sum: number, t: Record<string, unknown>) => sum + Number(t.amount), 0));
+    const incomeTransactions = transactions?.filter((t: Record<string, unknown>) => (Number(t.amount) || 0) > 0) ?? [];
+    const expenseTransactions = transactions?.filter((t: Record<string, unknown>) => (Number(t.amount) || 0) < 0) ?? [];
+    const totalIncome = incomeTransactions.reduce((sum: number, t: Record<string, unknown>) => sum + (Number(t.amount) || 0), 0);
+    const totalExpenses = Math.abs(expenseTransactions.reduce((sum: number, t: Record<string, unknown>) => sum + (Number(t.amount) || 0), 0));
     const overdueInvoices = invoices?.filter((i: Record<string, unknown>) => i.status === "overdue") ?? [];
-    const totalOverdue = overdueInvoices.reduce((sum: number, i: Record<string, unknown>) => sum + Number(i.amount), 0);
+    const totalOverdue = overdueInvoices.reduce((sum: number, i: Record<string, unknown>) => sum + (Number(i.amount) || 0), 0);
+
+    // Pre-calculate key metrics server-side to avoid NaN from LLM
+    const pendingInvoices = invoices?.filter((i: Record<string, unknown>) => i.status === "pending" || i.status === "overdue") ?? [];
+    const totalReceivables = pendingInvoices.reduce((sum: number, i: Record<string, unknown>) => sum + (Number(i.amount) || 0), 0);
+    const safeOverdue = overdueInvoices.reduce((sum: number, i: Record<string, unknown>) => sum + (Number(i.amount) || 0), 0);
+    const cashPosition = totalIncome - totalExpenses;
+    
+    // Determine income trend
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+    const recentIncome = incomeTransactions
+      .filter((t: Record<string, unknown>) => new Date(t.date as string) >= thirtyDaysAgo)
+      .reduce((sum: number, t: Record<string, unknown>) => sum + (Number(t.amount) || 0), 0);
+    const priorIncome = incomeTransactions
+      .filter((t: Record<string, unknown>) => {
+        const d = new Date(t.date as string);
+        return d >= sixtyDaysAgo && d < thirtyDaysAgo;
+      })
+      .reduce((sum: number, t: Record<string, unknown>) => sum + (Number(t.amount) || 0), 0);
+    const incomeTrend: "up" | "down" | "stable" = 
+      priorIncome === 0 ? "stable" :
+      recentIncome > priorIncome * 1.05 ? "up" :
+      recentIncome < priorIncome * 0.95 ? "down" : "stable";
+
+    // These server-calculated metrics will be used as the source of truth
+    const serverMetrics = {
+      total_receivables: totalReceivables,
+      overdue_amount: safeOverdue,
+      monthly_income_trend: incomeTrend,
+      cash_position: cashPosition,
+    };
 
     const prompt = `You are a trusted financial advisor writing a personalized weekly briefing for a freelancer/SMB owner. Write in the tone of a business partner who knows this person well — warm, direct, never condescending, always specific with dollar amounts.
 
@@ -79,8 +111,9 @@ WEEK: ${todayStr}
 FINANCIAL DATA SUMMARY:
 - Total income (from transactions): $${totalIncome.toFixed(2)}
 - Total expenses (from transactions): $${totalExpenses.toFixed(2)}
-- Net position: $${(totalIncome - totalExpenses).toFixed(2)}
-- Overdue invoices: ${overdueInvoices.length} totaling $${totalOverdue.toFixed(2)}
+- Net position: $${cashPosition.toFixed(2)}
+- Overdue invoices: ${overdueInvoices.length} totaling $${safeOverdue.toFixed(2)}
+- Total receivables (pending + overdue): $${totalReceivables.toFixed(2)}
 
 RECENT TRANSACTIONS (last 30):
 ${JSON.stringify(transactions?.slice(0, 30) ?? [], null, 2)}
@@ -107,27 +140,29 @@ Generate a weekly financial briefing. Return a JSON object with:
    - "positive_close": Object with:
      - "title": Short positive headline (e.g., "Revenue Up 12% This Month")
      - "detail": 1-2 sentences highlighting something positive — a paid invoice, revenue growth, expense reduction, or healthy trend
-   - "full_narrative": The COMPLETE briefing as a single plain-English narrative, 250-350 words. This should flow naturally as one cohesive piece combining all the sections above. No headers, no bullet points — just clear, warm prose. Written in second person ("you"). Every figure mentioned must be in USD. No financial jargon (no EBITDA, amortization, liquidity ratio, accounts receivable aging, etc.).
+   - "full_narrative": The COMPLETE briefing as a plain-English narrative, 250-350 words. IMPORTANT FORMATTING: Break the narrative into 4-5 SHORT PARAGRAPHS separated by newlines. Each paragraph should cover one topic: (1) overall position, (2) biggest concern with specifics, (3) recommended actions, (4) what's coming next, (5) a positive note. This should flow naturally — no headers, no bullet points, just clear warm prose in short digestible paragraphs. Written in second person ("you"). Every figure mentioned must be in USD. No financial jargon.
 
 2. "metadata": Object with:
    - "generated_date": "${todayStr}"
    - "word_count": Word count of full_narrative (must be 250-350)
    - "data_freshness": Description of data recency
    - "key_metrics": Object with:
-     - "total_receivables": Total outstanding invoices
-     - "overdue_amount": Total overdue amount
-     - "monthly_income_trend": "up", "down", or "stable"
-     - "cash_position": Current estimated cash position
+     - "total_receivables": ${totalReceivables} (use this exact number)
+     - "overdue_amount": ${safeOverdue} (use this exact number)
+     - "monthly_income_trend": "${incomeTrend}" (use this exact value)
+     - "cash_position": ${cashPosition} (use this exact number)
    - "tone_check": "warm_and_direct" (confirm tone)
 
 CRITICAL RULES:
 - The full_narrative MUST be 250-350 words. Count carefully.
+- The full_narrative MUST be broken into 4-5 short paragraphs separated by "\\n\\n". Do NOT write one long paragraph.
 - Never use financial jargon. Write in plain English.
 - Be specific with dollar amounts, client names, and dates.
 - Every recommendation must be actionable and specific to the data.
 - Tone: trusted advisor, not a robot. Warm but direct.
 - Write in second person ("you", "your").
 - Do not use bullet points or headers in the narrative.
+- key_metrics values MUST be numbers, not strings. Do NOT quote them.
 
 Return ONLY valid JSON. No markdown fences. No extra text.`;
 
@@ -147,6 +182,19 @@ Return ONLY valid JSON. No markdown fences. No extra text.`;
       briefing = JSON.parse(jsonStr);
     } catch {
       briefing = { raw_analysis: rawText };
+    }
+
+    // Override key_metrics with server-calculated values to prevent NaN
+    if (briefing.metadata) {
+      briefing.metadata.key_metrics = {
+        ...briefing.metadata.key_metrics,
+        ...serverMetrics,
+      };
+    } else {
+      briefing.metadata = {
+        generated_date: todayStr,
+        key_metrics: serverMetrics,
+      };
     }
 
     return NextResponse.json({ briefing });
