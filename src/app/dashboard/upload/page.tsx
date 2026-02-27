@@ -17,6 +17,7 @@ import type { NormalizedTransaction } from "@/lib/file-parser";
 type UploadStep = "select" | "parsing" | "preview" | "importing" | "done";
 
 const ACCEPTED_EXTENSIONS = ".csv,.xlsx,.xls,.pdf";
+const UPLOAD_BATCH_SIZE = 200; // Send 200 transactions per API call
 
 interface ProgressState {
   percent: number;
@@ -37,6 +38,7 @@ export default function UploadPage() {
   const [resultMessage, setResultMessage] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [parsedByAI, setParsedByAI] = useState(false);
+  const [importProgress, setImportProgress] = useState({ current: 0, total: 0 });
   const [progress, setProgress] = useState<ProgressState>({
     percent: 0,
     message: "Starting...",
@@ -195,21 +197,46 @@ export default function UploadPage() {
     }
   };
 
+  // ================================================================
+  // FIXED: Send pre-parsed transactions in batches, not raw CSV text
+  // ================================================================
   const handleImport = async () => {
     setStep("importing");
     setError("");
 
     try {
-      const res = await fetch("/api/transactions/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ csvText, currency }),
-      });
+      const totalBatches = Math.ceil(preview.length / UPLOAD_BATCH_SIZE);
+      let totalImported = 0;
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Import failed");
+      for (let i = 0; i < preview.length; i += UPLOAD_BATCH_SIZE) {
+        const batch = preview.slice(i, i + UPLOAD_BATCH_SIZE);
+        const batchNum = Math.floor(i / UPLOAD_BATCH_SIZE) + 1;
 
-      setResultMessage(data.message);
+        setImportProgress({ current: batchNum, total: totalBatches });
+
+        const res = await fetch("/api/transactions/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            transactions: batch.map((t) => ({
+              date: t.date,
+              description: t.description,
+              amount: t.amount,
+              currency: t.currency,
+              type: t.type,
+              category: t.category,
+            })),
+            currency,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Batch ${batchNum} failed`);
+
+        totalImported += data.count || batch.length;
+      }
+
+      setResultMessage(`Successfully imported ${totalImported} transactions`);
       setStep("done");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Import failed");
@@ -226,6 +253,7 @@ export default function UploadPage() {
     setError("");
     setResultMessage("");
     setParsedByAI(false);
+    setImportProgress({ current: 0, total: 0 });
     setProgress({ percent: 0, message: "Starting...", stage: "init" });
   };
 
@@ -258,83 +286,35 @@ export default function UploadPage() {
       {step === "select" && (
         <div className="rounded-xl border border-zinc-200 bg-white p-6">
           <div className="mb-4">
-            <label className="block text-sm font-medium text-zinc-700 mb-1">Currency</label>
-            <select
-              value={currency}
-              onChange={(e) => setCurrency(e.target.value)}
-              className="rounded-lg border border-zinc-300 px-3 py-2 text-sm text-zinc-900 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-            >
-              <option value="USD">USD — US Dollar</option>
-              <option value="EUR">EUR — Euro</option>
-              <option value="GBP">GBP — British Pound</option>
-              <option value="INR">INR — Indian Rupee</option>
-              <option value="CAD">CAD — Canadian Dollar</option>
-              <option value="AUD">AUD — Australian Dollar</option>
-              <option value="JPY">JPY — Japanese Yen</option>
-              <option value="CNY">CNY — Chinese Yuan</option>
-              <option value="SGD">SGD — Singapore Dollar</option>
-              <option value="AED">AED — UAE Dirham</option>
-              <option value="SAR">SAR — Saudi Riyal</option>
-              <option value="ZAR">ZAR — South African Rand</option>
-              <option value="BRL">BRL — Brazilian Real</option>
-              <option value="MXN">MXN — Mexican Peso</option>
-              <option value="KRW">KRW — South Korean Won</option>
-              <option value="THB">THB — Thai Baht</option>
-              <option value="NGN">NGN — Nigerian Naira</option>
-              <option value="KES">KES — Kenyan Shilling</option>
-              <option value="EGP">EGP — Egyptian Pound</option>
-              <option value="PKR">PKR — Pakistani Rupee</option>
-              <option value="BDT">BDT — Bangladeshi Taka</option>
-              <option value="PHP">PHP — Philippine Peso</option>
-              <option value="IDR">IDR — Indonesian Rupiah</option>
-              <option value="MYR">MYR — Malaysian Ringgit</option>
-              <option value="VND">VND — Vietnamese Dong</option>
-              <option value="CHF">CHF — Swiss Franc</option>
-              <option value="SEK">SEK — Swedish Krona</option>
-              <option value="NOK">NOK — Norwegian Krone</option>
-              <option value="DKK">DKK — Danish Krone</option>
-              <option value="PLN">PLN — Polish Zloty</option>
-              <option value="CZK">CZK — Czech Koruna</option>
-              <option value="HUF">HUF — Hungarian Forint</option>
-              <option value="RON">RON — Romanian Leu</option>
-              <option value="TRY">TRY — Turkish Lira</option>
-              <option value="ILS">ILS — Israeli Shekel</option>
-              <option value="NZD">NZD — New Zealand Dollar</option>
-              <option value="HKD">HKD — Hong Kong Dollar</option>
-              <option value="TWD">TWD — Taiwan Dollar</option>
-              <option value="CLP">CLP — Chilean Peso</option>
-              <option value="COP">COP — Colombian Peso</option>
-              <option value="PEN">PEN — Peruvian Sol</option>
-              <option value="ARS">ARS — Argentine Peso</option>
-            </select>
-          </div>
+            <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-zinc-300 bg-zinc-50 p-12 transition-all hover:border-emerald-400 hover:bg-emerald-50/30">
+              <Upload className="mb-3 h-10 w-10 text-zinc-400" />
+              <p className="text-sm font-medium text-zinc-600 mb-1">
+                Drop your bank statement here
+              </p>
+              <p className="text-xs text-zinc-400 mb-3">or click to browse</p>
+              <div className="flex gap-2">
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                  <FileText className="h-3 w-3" /> CSV
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 border border-blue-200 px-2.5 py-1 text-xs font-medium text-blue-700">
+                  <FileSpreadsheet className="h-3 w-3" /> Excel
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-red-50 border border-red-200 px-2.5 py-1 text-xs font-medium text-red-700">
+                  <File className="h-3 w-3" /> PDF
+                </span>
+              </div>
+              <input type="file" accept={ACCEPTED_EXTENSIONS} className="hidden" onChange={handleFileSelect} />
+            </label>
 
-          <label className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-zinc-300 bg-zinc-50 py-16 cursor-pointer hover:border-emerald-300 hover:bg-emerald-50/30 transition-colors">
-            <Upload className="h-10 w-10 text-zinc-400 mb-3" />
-            <p className="text-sm font-medium text-zinc-600">Click to upload bank statement</p>
-            <p className="text-xs text-zinc-400 mt-1">Works with any bank, any country, any format</p>
-            <div className="flex items-center gap-3 mt-4">
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                <FileText className="h-3 w-3" /> CSV
-              </span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 border border-blue-200 px-2.5 py-1 text-xs font-medium text-blue-700">
-                <FileSpreadsheet className="h-3 w-3" /> Excel
-              </span>
-              <span className="inline-flex items-center gap-1 rounded-full bg-red-50 border border-red-200 px-2.5 py-1 text-xs font-medium text-red-700">
-                <File className="h-3 w-3" /> PDF
-              </span>
+            <div className="mt-4 rounded-lg bg-zinc-50 border border-zinc-100 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
+                <p className="text-xs font-medium text-zinc-600">Universal AI-powered parser</p>
+              </div>
+              <p className="text-xs text-zinc-500 leading-relaxed">
+                Fynn uses AI to automatically detect and extract transactions from any bank statement format — HDFC, SBI, Chase, Barclays, DBS, and hundreds more.
+              </p>
             </div>
-            <input type="file" accept={ACCEPTED_EXTENSIONS} className="hidden" onChange={handleFileSelect} />
-          </label>
-
-          <div className="mt-4 rounded-lg bg-zinc-50 border border-zinc-100 p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Sparkles className="h-3.5 w-3.5 text-emerald-600" />
-              <p className="text-xs font-medium text-zinc-600">Universal AI-powered parser</p>
-            </div>
-            <p className="text-xs text-zinc-500 leading-relaxed">
-              Fynn uses AI to automatically detect and extract transactions from any bank statement format — HDFC, SBI, Chase, Barclays, DBS, and hundreds more.
-            </p>
           </div>
         </div>
       )}
@@ -491,11 +471,25 @@ export default function UploadPage() {
         </div>
       )}
 
-      {/* Step: Importing */}
+      {/* Step: Importing — NOW WITH BATCH PROGRESS */}
       {step === "importing" && (
         <div className="flex flex-col items-center justify-center rounded-xl border border-zinc-200 bg-white py-16">
           <Loader2 className="h-8 w-8 text-emerald-600 animate-spin mb-4" />
           <p className="text-sm font-medium text-zinc-600">Importing transactions...</p>
+          {importProgress.total > 1 && (
+            <div className="mt-3 w-64">
+              <div className="flex justify-between text-xs text-zinc-400 mb-1">
+                <span>Batch {importProgress.current} of {importProgress.total}</span>
+                <span>{Math.round((importProgress.current / importProgress.total) * 100)}%</span>
+              </div>
+              <div className="h-2 w-full rounded-full bg-zinc-100 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                  style={{ width: `${(importProgress.current / importProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
