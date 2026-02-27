@@ -77,15 +77,30 @@ function pn(r: string): number {
 }
 function normDate(raw: string): string | null {
   const t = raw.trim();
-  let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (m) { let y = m[3]; if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y; return `${y}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`; }
-  m = t.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/);
-  if (m) { let y = m[3]; if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y; return `${y}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`; }
-  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(t)) { const [y,mo,d] = t.split("-"); return `${y}-${mo.padStart(2,"0")}-${d.padStart(2,"0")}`; }
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(t)) {
+    const [y, mo, d] = t.split("-");
+    const mi = parseInt(mo), di = parseInt(d);
+    if (mi >= 1 && mi <= 12 && di >= 1 && di <= 31) return `${y}-${mo.padStart(2,"0")}-${d.padStart(2,"0")}`;
+    if (di >= 1 && di <= 12 && mi >= 1 && mi <= 31) return `${y}-${d.padStart(2,"0")}-${mo.padStart(2,"0")}`;
+    return null;
+  }
+  // DD/MM/YYYY or MM/DD/YYYY
+  let m = t.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
+  if (m) {
+    let [, a, b, y] = m;
+    if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y;
+    const ai = parseInt(a), bi = parseInt(b);
+    let month: number, day: number;
+    if (ai > 12 && bi <= 12) { day = ai; month = bi; }
+    else if (bi > 12 && ai <= 12) { month = ai; day = bi; }
+    else { day = ai; month = bi; } // default DD/MM
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return `${y}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+  }
+  // DD-Mon-YYYY
   m = t.match(/^(\d{1,2})[\s-](\w{3,9})[\s-](\d{2,4})$/);
   if (m) { let y = m[3]; if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y; const mo: Record<string,string> = {jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12"}; const mn = mo[m[2].toLowerCase().slice(0,3)]; if (mn) return `${y}-${mn}-${m[1].padStart(2,"0")}`; }
-  m = t.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/);
-  if (m) { let y = m[3]; if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y; return `${y}-${m[1].padStart(2,"0")}-${m[2].padStart(2,"0")}`; }
   const p = new Date(t); return isNaN(p.getTime()) ? null : p.toISOString().split("T")[0];
 }
 
