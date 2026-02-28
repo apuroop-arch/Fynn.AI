@@ -406,7 +406,20 @@ export default function UploadPage() {
               )}
               <span className="text-xs text-zinc-400">({preview.length} transactions)</span>
             </div>
-            <div className="flex gap-2">
+            <div className="flex items-center gap-3">
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 bg-white hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                <option value="USD">$ USD</option>
+                <option value="INR">₹ INR</option>
+                <option value="GBP">£ GBP</option>
+                <option value="EUR">€ EUR</option>
+                <option value="CAD">$ CAD</option>
+                <option value="AUD">$ AUD</option>
+                <option value="SGD">$ SGD</option>
+              </select>
               <button
                 onClick={reset}
                 className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors"
