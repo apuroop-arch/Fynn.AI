@@ -2,27 +2,36 @@ import { auth } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 
-// ============================================================
-// ARCHITECTURE:
-// 1. Excel → try LOCAL parse first (instant, free, handles 90%)
-// 2. If local fails → AI parse with CHUNKING + SSE progress
-// 3. PDF → AI parse (always, since PDFs need vision)
-// 4. CSV with non-standard headers → AI parse with chunking
-//
-// SSE STREAMING: For large files needing AI, we stream progress
-// updates so frontend shows a real progress bar.
-// ============================================================
-
 const DATE_KW = ["date", "txn date", "transaction date", "posting date", "value date", "book date"];
 const DESC_KW = ["description", "narration", "particulars", "details", "memo", "remarks", "reference", "transaction details"];
 const AMT_KW = ["amount", "transaction amount", "value", "sum", "total"];
 const DR_KW = ["withdrawal", "debit", "debit amount", "dr", "withdrawal amt", "debit amt"];
 const CR_KW = ["deposit", "credit", "credit amount", "cr", "deposit amt", "credit amt"];
 
-interface LocalResult { success: boolean; csvText?: string; rowCount?: number; }
+interface LocalResult { success: boolean; csvText?: string; rowCount?: number; currency?: string; }
+
+function detectCurrency(rows: string[][]): string {
+  const allText = rows.slice(0, 10).flat().join(" ");
+  if (allText.includes("₹") || /\bINR\b/i.test(allText) || /rupee/i.test(allText)) return "INR";
+  if (allText.includes("£") || /\bGBP\b/i.test(allText)) return "GBP";
+  if (allText.includes("€") || /\bEUR\b/i.test(allText)) return "EUR";
+  if (allText.includes("¥") || /\bJPY\b/i.test(allText)) return "JPY";
+  if (allText.includes("$") || /\bUSD\b/i.test(allText)) return "USD";
+  return "USD";
+}
+
+function detectCurrencyFromText(content: string): string {
+  const sample = content.slice(0, 2000);
+  if (sample.includes("₹") || /\bINR\b/i.test(sample) || /rupee/i.test(sample)) return "INR";
+  if (sample.includes("£") || /\bGBP\b/i.test(sample)) return "GBP";
+  if (sample.includes("€") || /\bEUR\b/i.test(sample)) return "EUR";
+  if (sample.includes("¥") || /\bJPY\b/i.test(sample)) return "JPY";
+  return "USD";
+}
 
 function tryLocalParse(rows: string[][]): LocalResult {
   try {
+    const currency = detectCurrency(rows);
     let headerIdx = -1;
     for (let i = 0; i < Math.min(rows.length, 20); i++) {
       const row = rows[i];
@@ -65,7 +74,7 @@ function tryLocalParse(rows: string[][]): LocalResult {
       out.push(`${nd},${sd},${amt.toFixed(2)}`);
     }
     if (out.length <= 1) return { success: false };
-    return { success: true, csvText: out.join("\n"), rowCount: out.length - 1 };
+    return { success: true, csvText: out.join("\n"), rowCount: out.length - 1, currency };
   } catch { return { success: false }; }
 }
 
@@ -77,7 +86,6 @@ function pn(r: string): number {
 }
 function normDate(raw: string): string | null {
   const t = raw.trim();
-  // Already YYYY-MM-DD
   if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(t)) {
     const [y, mo, d] = t.split("-");
     const mi = parseInt(mo), di = parseInt(d);
@@ -85,7 +93,6 @@ function normDate(raw: string): string | null {
     if (di >= 1 && di <= 12 && mi >= 1 && mi <= 31) return `${y}-${d.padStart(2,"0")}-${mo.padStart(2,"0")}`;
     return null;
   }
-  // DD/MM/YYYY or MM/DD/YYYY
   let m = t.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/);
   if (m) {
     let [, a, b, y] = m;
@@ -94,20 +101,20 @@ function normDate(raw: string): string | null {
     let month: number, day: number;
     if (ai > 12 && bi <= 12) { day = ai; month = bi; }
     else if (bi > 12 && ai <= 12) { month = ai; day = bi; }
-    else { day = ai; month = bi; } // default DD/MM
+    else { day = ai; month = bi; }
     if (month < 1 || month > 12 || day < 1 || day > 31) return null;
     return `${y}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
   }
-  // DD-Mon-YYYY
   m = t.match(/^(\d{1,2})[\s-](\w{3,9})[\s-](\d{2,4})$/);
   if (m) { let y = m[3]; if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y; const mo: Record<string,string> = {jan:"01",feb:"02",mar:"03",apr:"04",may:"05",jun:"06",jul:"07",aug:"08",sep:"09",oct:"10",nov:"11",dec:"12"}; const mn = mo[m[2].toLowerCase().slice(0,3)]; if (mn) return `${y}-${mn}-${m[1].padStart(2,"0")}`; }
   const p = new Date(t); return isNaN(p.getTime()) ? null : p.toISOString().split("T")[0];
 }
 
 const PROMPT = `Extract ALL transactions from this bank statement as CSV.
-Headers: date,description,amount
+Headers: date,description,amount,currency
 - date: YYYY-MM-DD
 - amount: positive=credit/deposit, negative=debit/withdrawal
+- currency: 3-letter ISO code (e.g. INR, USD, GBP, EUR). Detect from symbols (₹=INR, $=USD, £=GBP, €=EUR) or statement header. Use same currency for every row.
 - Combine separate debit/credit columns
 - Skip balances, totals, headers, empty rows
 - Quote descriptions containing commas
@@ -117,9 +124,6 @@ function sseEvent(type: string, data: Record<string, unknown>): string {
   return `data: ${JSON.stringify({ type, ...data })}\n\n`;
 }
 
-// ============================================================
-// CHUNKED AI PARSING WITH SSE PROGRESS
-// ============================================================
 async function parseChunkedWithAIStream(
   content: string, fileName: string, controller: ReadableStreamDefaultController
 ) {
@@ -131,8 +135,8 @@ async function parseChunkedWithAIStream(
   const anthropic = new Anthropic({ apiKey });
   const lines = content.split("\n").filter(l => l.trim());
   const enc = new TextEncoder();
+  const detectedCurrency = detectCurrencyFromText(content);
 
-  // Small file — single request
   if (lines.length <= 300) {
     controller.enqueue(enc.encode(sseEvent("progress", { stage: "analyzing", message: "Analyzing transactions...", percent: 20 })));
     try {
@@ -147,16 +151,15 @@ async function parseChunkedWithAIStream(
       let csv = text.replace(/^```(?:csv)?\s*/i, "").replace(/\s*```$/i, "").trim();
       if (!csv || !csv.includes(",")) { controller.enqueue(enc.encode(sseEvent("error", { message: "Could not extract transactions." }))); controller.close(); return; }
       const first = csv.split("\n")[0]?.toLowerCase().trim();
-      if (!first?.includes("date") || !first?.includes("amount")) csv = "date,description,amount\n" + csv;
+      if (!first?.includes("date") || !first?.includes("amount")) csv = "date,description,amount,currency\n" + csv;
       const rowCount = csv.split("\n").filter(l => l.trim()).length - 1;
-      controller.enqueue(enc.encode(sseEvent("complete", { csvText: csv, rowCount, message: `Extracted ${rowCount} transactions` })));
+      controller.enqueue(enc.encode(sseEvent("complete", { csvText: csv, rowCount, currency: detectedCurrency, message: `Extracted ${rowCount} transactions` })));
     } catch (err) {
       controller.enqueue(enc.encode(sseEvent("error", { message: err instanceof Error ? err.message : "AI parsing failed" })));
     }
     controller.close(); return;
   }
 
-  // LARGE FILE — CHUNKING
   const headerContext = lines.slice(0, 15).join("\n");
   const dataLines = lines.slice(15);
   const CHUNK_SIZE = 200;
@@ -171,13 +174,12 @@ async function parseChunkedWithAIStream(
     stage: "chunking", message: `Splitting ${lines.length} rows into ${totalChunks} chunks (${totalBatches} batches)...`, percent: 5, totalChunks,
   })));
 
-  const allCSVLines: string[] = ["date,description,amount"];
+  const allCSVLines: string[] = ["date,description,amount,currency"];
   let completedChunks = 0;
 
   for (let i = 0; i < chunks.length; i += 3) {
     const batch = chunks.slice(i, i + 3);
     const batchNum = Math.floor(i / 3) + 1;
-
     controller.enqueue(enc.encode(sseEvent("progress", {
       stage: "extracting",
       message: `Processing batch ${batchNum} of ${totalBatches}...`,
@@ -226,14 +228,11 @@ async function parseChunkedWithAIStream(
 
   const csvText = allCSVLines.join("\n");
   const rowCount = allCSVLines.length - 1;
-  controller.enqueue(enc.encode(sseEvent("complete", { csvText, rowCount, message: `Extracted ${rowCount} transactions` })));
+  controller.enqueue(enc.encode(sseEvent("complete", { csvText, rowCount, currency: detectedCurrency, message: `Extracted ${rowCount} transactions` })));
   controller.close();
 }
 
-// ============================================================
-// AI DOCUMENT PARSING (PDF / binary Excel)
-// ============================================================
-async function parseDocumentWithAI(base64: string, mediaType: string): Promise<NextResponse> {
+async function parseDocumentWithAI(base64: string, mediaType: string, originalContent?: string): Promise<NextResponse> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return NextResponse.json({ error: "API key not configured" }, { status: 500 });
   const anthropic = new Anthropic({ apiKey });
@@ -248,14 +247,12 @@ async function parseDocumentWithAI(base64: string, mediaType: string): Promise<N
   let csv = text.replace(/^```(?:csv)?\s*/i, "").replace(/\s*```$/i, "").trim();
   if (!csv || !csv.includes(",")) return NextResponse.json({ error: "Could not extract transactions." }, { status: 400 });
   const first = csv.split("\n")[0]?.toLowerCase().trim();
-  if (!first?.includes("date") || !first?.includes("amount")) csv = "date,description,amount\n" + csv;
+  if (!first?.includes("date") || !first?.includes("amount")) csv = "date,description,amount,currency\n" + csv;
   const rowCount = csv.split("\n").filter(l => l.trim()).length - 1;
-  return NextResponse.json({ csvText: csv, rowCount, message: `Extracted ${rowCount} transactions` });
+  const detectedCurrency = originalContent ? detectCurrencyFromText(originalContent) : "USD";
+  return NextResponse.json({ csvText: csv, rowCount, currency: detectedCurrency, message: `Extracted ${rowCount} transactions` });
 }
 
-// ============================================================
-// MAIN HANDLER
-// ============================================================
 export async function POST(req: NextRequest) {
   try {
     const { userId } = await auth();
@@ -282,9 +279,8 @@ export async function POST(req: NextRequest) {
           const rows = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, raw: false, defval: "" }) as string[][];
           const local = tryLocalParse(rows);
           if (local.success && local.csvText) {
-            return NextResponse.json({ csvText: local.csvText, rowCount: local.rowCount, message: `Extracted ${local.rowCount} transactions` });
+            return NextResponse.json({ csvText: local.csvText, rowCount: local.rowCount, currency: local.currency ?? "USD", message: `Extracted ${local.rowCount} transactions` });
           }
-          // Local failed → AI + streaming
           const csvContent = XLSX.utils.sheet_to_csv(sheet, { blankrows: false });
           if (stream) {
             const readable = new ReadableStream({ start(controller) { parseChunkedWithAIStream(csvContent, file.name, controller); } });
@@ -330,12 +326,12 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// NON-STREAMING FALLBACK
 async function parseNonStream(content: string, fileName: string): Promise<NextResponse> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return NextResponse.json({ error: "API key not configured" }, { status: 500 });
   const anthropic = new Anthropic({ apiKey });
   const lines = content.split("\n").filter(l => l.trim());
+  const detectedCurrency = detectCurrencyFromText(content);
 
   if (lines.length <= 300) {
     const response = await anthropic.messages.create({
@@ -349,9 +345,9 @@ async function parseNonStream(content: string, fileName: string): Promise<NextRe
     let csv = text.replace(/^```(?:csv)?\s*/i, "").replace(/\s*```$/i, "").trim();
     if (!csv || !csv.includes(",")) return NextResponse.json({ error: "Could not extract transactions." }, { status: 400 });
     const first = csv.split("\n")[0]?.toLowerCase().trim();
-    if (!first?.includes("date") || !first?.includes("amount")) csv = "date,description,amount\n" + csv;
+    if (!first?.includes("date") || !first?.includes("amount")) csv = "date,description,amount,currency\n" + csv;
     const rowCount = csv.split("\n").filter(l => l.trim()).length - 1;
-    return NextResponse.json({ csvText: csv, rowCount, message: `Extracted ${rowCount} transactions` });
+    return NextResponse.json({ csvText: csv, rowCount, currency: detectedCurrency, message: `Extracted ${rowCount} transactions` });
   }
 
   const headerContext = lines.slice(0, 15).join("\n");
@@ -359,7 +355,7 @@ async function parseNonStream(content: string, fileName: string): Promise<NextRe
   const chunks: string[] = [];
   for (let i = 0; i < dataLines.length; i += 200) { chunks.push(headerContext + "\n" + dataLines.slice(i, i + 200).join("\n")); }
 
-  const allCSVLines: string[] = ["date,description,amount"];
+  const allCSVLines: string[] = ["date,description,amount,currency"];
   for (let i = 0; i < chunks.length; i += 3) {
     const batch = chunks.slice(i, i + 3);
     const results = await Promise.all(batch.map(async (chunk, idx) => {
@@ -378,5 +374,5 @@ async function parseNonStream(content: string, fileName: string): Promise<NextRe
     for (const r of results) { if (r) { for (const l of r.split("\n").filter(l => l.trim())) { if (!l.toLowerCase().startsWith("date,")) allCSVLines.push(l); } } }
   }
   if (allCSVLines.length <= 1) return NextResponse.json({ error: "Could not extract transactions." }, { status: 400 });
-  return NextResponse.json({ csvText: allCSVLines.join("\n"), rowCount: allCSVLines.length - 1, message: `Extracted ${allCSVLines.length - 1} transactions` });
+  return NextResponse.json({ csvText: allCSVLines.join("\n"), rowCount: allCSVLines.length - 1, currency: detectedCurrency, message: `Extracted ${allCSVLines.length - 1} transactions` });
 }
