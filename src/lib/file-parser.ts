@@ -151,7 +151,7 @@ function normalizeDate(raw: string): string {
     }
   }
 
-  throw new Error(`Cannot parse date: ${raw}`);
+  return null;
 }
 
 /**
@@ -210,17 +210,17 @@ export function normalizeTransactions(
   rows: RawTransaction[],
   currency: string = "USD"
 ): NormalizedTransaction[] {
-  return rows.map((row, index) => {
+  const results: NormalizedTransaction[] = [];
+  for (let index = 0; index < rows.length; index++) {
+    const row = rows[index];
     try {
       const date = normalizeDate(row.date);
+      if (!date) continue; // skip rows with unparseable dates (footers, junk rows)
       const { amount, type } = normalizeAmount(row.amount);
       const explicitType = row.type?.trim().toLowerCase();
-
-      // Use per-row currency if AI detected it, otherwise fall back to the passed-in currency
       const rowCurrency =
         (row as any).currency?.trim().toUpperCase() || currency.toUpperCase();
-
-      return {
+      results.push({
         date,
         description: row.description?.trim() || `Transaction ${index + 1}`,
         amount,
@@ -230,11 +230,10 @@ export function normalizeTransactions(
             ? explicitType
             : type,
         category: row.category?.trim() || null,
-      };
-    } catch (err) {
-      throw new Error(
-        `Row ${index + 1}: ${err instanceof Error ? err.message : "Parse error"}`
-      );
+      });
+    } catch {
+      // skip unparseable rows silently
     }
-  });
+  }
+  return results;
 }
