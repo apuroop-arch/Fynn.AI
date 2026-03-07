@@ -103,6 +103,7 @@ function normalizeDate(raw: string): string {
 
   // DD/MM/YYYY or MM/DD/YYYY (slash separated)
   const slashMatch = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  // Note: 2-digit years like "01/10/25" are handled by smartDayMonth via y.length===2 check
   if (slashMatch) {
     let [, a, b, y] = slashMatch;
     if (y.length === 2) y = (parseInt(y) > 50 ? "19" : "20") + y;
@@ -138,10 +139,16 @@ function normalizeDate(raw: string): string {
     if (m) return `${y}-${m}-${d.padStart(2, "0")}`;
   }
 
-  // Fallback: native Date parsing
-  const parsed = new Date(trimmed);
-  if (!isNaN(parsed.getTime())) {
-    return parsed.toISOString().split("T")[0];
+  // Fallback: native Date parsing — BUT only for unambiguous formats
+  // Avoid passing DD/MM/YY or short formats to new Date() as it misparses them
+  // as time offsets (e.g. "01/10/25" → timezone "+13" error)
+  const parts = trimmed.split(/[\s,]+/);
+  if (parts.length >= 2) {
+    // Try parsing as "Month DD, YYYY" or "DD Month YYYY" style only
+    const parsed = new Date(trimmed);
+    if (!isNaN(parsed.getTime()) && parsed.getFullYear() > 1970) {
+      return parsed.toISOString().split("T")[0];
+    }
   }
 
   throw new Error(`Cannot parse date: ${raw}`);
@@ -209,11 +216,15 @@ export function normalizeTransactions(
       const { amount, type } = normalizeAmount(row.amount);
       const explicitType = row.type?.trim().toLowerCase();
 
+      // Use per-row currency if AI detected it, otherwise fall back to the passed-in currency
+      const rowCurrency =
+        (row as any).currency?.trim().toUpperCase() || currency.toUpperCase();
+
       return {
         date,
         description: row.description?.trim() || `Transaction ${index + 1}`,
         amount,
-        currency: currency.toUpperCase(),
+        currency: rowCurrency,
         type:
           explicitType === "credit" || explicitType === "debit"
             ? explicitType
