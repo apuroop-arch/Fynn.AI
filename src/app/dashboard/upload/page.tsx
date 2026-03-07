@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import {
   Upload,
   FileText,
@@ -29,6 +30,7 @@ interface ProgressState {
 }
 
 export default function UploadPage() {
+  const router = useRouter();
   const [step, setStep] = useState<UploadStep>("select");
   const [fileName, setFileName] = useState("");
   const [fileExt, setFileExt] = useState("");
@@ -100,6 +102,7 @@ export default function UploadPage() {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("stream", "true");
+      formData.append("currency", currency); // pass selected currency to AI
 
       const res = await fetch("/api/transactions/parse-file", {
         method: "POST",
@@ -148,6 +151,7 @@ export default function UploadPage() {
               } else if (data.type === "complete") {
                 finalCSV = data.csvText;
                 finalRowCount = data.rowCount;
+                if (data.currency) setCurrency(data.currency); // auto-detect currency
                 setProgress({
                   percent: 100,
                   message: `Done! ${finalRowCount} transactions extracted`,
@@ -183,6 +187,7 @@ export default function UploadPage() {
         if (!res.ok) throw new Error(data.error || "Failed to parse file");
 
         setCsvText(data.csvText);
+        if (data.currency) setCurrency(data.currency); // auto-detect currency
         setProgress({ percent: 90, message: "Preparing preview...", stage: "preview" });
 
         const { parseCSV, normalizeTransactions } = await import("@/lib/file-parser");
@@ -238,6 +243,9 @@ export default function UploadPage() {
 
       setResultMessage(`Successfully imported ${totalImported} transactions`);
       setStep("done");
+      // Redirect to dashboard so KPIs re-fetch with the new data
+      router.push("/dashboard");
+      router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Import failed");
       setStep("preview");
@@ -286,6 +294,23 @@ export default function UploadPage() {
       {step === "select" && (
         <div className="rounded-xl border border-zinc-200 bg-white p-6">
           <div className="mb-4">
+            {/* Currency selector — shown BEFORE file select so it's used during parsing */}
+            <div className="mb-4 flex items-center gap-3">
+              <label className="text-sm font-medium text-zinc-700 shrink-0">Statement Currency:</label>
+              <select
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value)}
+                className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 bg-white hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                <option value="USD">$ USD</option>
+                <option value="INR">₹ INR</option>
+                <option value="GBP">£ GBP</option>
+                <option value="EUR">€ EUR</option>
+                <option value="CAD">$ CAD</option>
+                <option value="AUD">$ AUD</option>
+                <option value="SGD">$ SGD</option>
+              </select>
+            </div>
             <label className="flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed border-zinc-300 bg-zinc-50 p-12 transition-all hover:border-emerald-400 hover:bg-emerald-50/30">
               <Upload className="mb-3 h-10 w-10 text-zinc-400" />
               <p className="text-sm font-medium text-zinc-600 mb-1">
