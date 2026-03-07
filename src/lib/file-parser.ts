@@ -84,7 +84,7 @@ export function hasStandardHeaders(csvText: string): boolean {
  *   since most bank statements worldwide use DD/MM except US
  * - Validates that month is 1-12 and day is 1-31
  */
-function normalizeDate(raw: string): string {
+function normalizeDate(raw: string): string | null {
   const trimmed = raw.trim();
 
   // Already YYYY-MM-DD
@@ -160,7 +160,7 @@ function normalizeDate(raw: string): string {
  * - If b > 12 → b must be day, a is month (MM/DD format)
  * - If both <= 12 → assume DD/MM (Indian/European convention)
  */
-function smartDayMonth(a: string, b: string, y: string): string {
+function smartDayMonth(a: string, b: string, y: string): string | null {
   const ai = parseInt(a);
   const bi = parseInt(b);
 
@@ -181,9 +181,7 @@ function smartDayMonth(a: string, b: string, y: string): string {
   }
 
   // Final validation
-  if (month < 1 || month > 12 || day < 1 || day > 31) {
-    throw new Error(`Invalid date values: ${a}/${b}/${y}`);
-  }
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
 
   return `${y}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
