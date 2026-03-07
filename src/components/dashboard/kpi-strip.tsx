@@ -41,12 +41,18 @@ export function KpiStrip() {
   } | null>(null);
 
   useEffect(() => {
-    fetch("/api/dashboard/kpis")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((json) => {
-        if (json && !json.error) setData(json);
-      })
-      .catch(() => {});
+    const fetchKpis = () => {
+      fetch("/api/dashboard/kpis")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((json) => {
+          if (json && !json.error) setData(json);
+        })
+        .catch(() => {});
+    };
+
+    fetchKpis();
+    const interval = setInterval(fetchKpis, 30_000);
+    return () => clearInterval(interval);
   }, []);
 
   const currency = data?.currency ?? "USD";
